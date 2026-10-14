@@ -11,7 +11,7 @@ session_write_close();
 const STATES = [
     'Listening', 'Watching slides / board', 'Reading', 'Writing notes', 'Focused thinking',
     'Problem solving', 'Memorizing', 'Asking / answering', 'Discussing with others', 'Interested',
-    'Confused', 'Bored', 'Daydreaming', 'Distracted (phone, laptop)', 'Taking a break',
+    'Confused', 'Bored', 'Daydreaming', 'Distracted (phone, laptop)', 'Taking a break', 'Resting',
 ];
 const LANGUAGES = ['Mother tongue', 'English', 'Czech'];
 const FITNESS = ['Fit', 'Tired', 'Sleepy', 'Hungry', 'Stressed', 'Relaxed', 'Headache'];
@@ -78,6 +78,7 @@ const FITNESS = ['Fit', 'Tired', 'Sleepy', 'Hungry', 'Stressed', 'Relaxed', 'Hea
 <script>
 'use strict';
 const KEY = 'msl-toggles';
+const DOUBLE_CLICK_MS = 300;  // a single click on an activity is applied after this delay
 const saved = JSON.parse(sessionStorage.getItem(KEY) || '{}');
 
 function nameOf(b) {
@@ -96,6 +97,27 @@ document.querySelectorAll('button.toggle').forEach((b) => {
     b.classList.add('on');
   }
   b.addEventListener('click', () => {
+    if (b.dataset.group === 'state') {  // activities: wait whether this becomes a double click
+      if (b.clickTimer) {               // second click: "this activity was happening in the recent past"
+        clearTimeout(b.clickTimer);
+        b.clickTimer = null;
+        if (b.classList.contains('on')) {  // the button stays (or becomes) off
+          setOn(b, false);
+          MSL.log('toggle', `${b.dataset.group}: ${nameOf(b)} OFF`);
+        }
+        MSL.log('recent', `${b.dataset.group}: ${nameOf(b)} was happening in the recent past`);
+        b.classList.add('flash');
+        setTimeout(() => b.classList.remove('flash'), 400);
+        return;
+      }
+      b.clickTimer = setTimeout(() => { b.clickTimer = null; toggle(b); }, DOUBLE_CLICK_MS);
+      return;
+    }
+    toggle(b);
+  });
+});
+
+function toggle(b) {
     const on = !b.classList.contains('on');
     if (b.id === 'custom-language' && on) {       // ask for the language whenever Custom is switched on
       const dlg = document.getElementById('custom-dialog');
@@ -118,8 +140,7 @@ document.querySelectorAll('button.toggle').forEach((b) => {
     }
     setOn(b, on);
     MSL.log('toggle', `${b.dataset.group}: ${nameOf(b)} ${on ? 'ON' : 'OFF'}`);
-  });
-});
+}
 
 document.getElementById('device').addEventListener('change', (e) => {
   MSL.log('device', e.target.value);   // also stores the device in the PHP session

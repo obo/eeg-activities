@@ -3,7 +3,8 @@
 Small PHP + JavaScript web page for people wearing an EEG device (2x EMOTIV EPOC X, 1x Muse) to log their
 current mental state during a lecture. No database, no PHP extensions beyond the standard ones.
 
-- `index.php` – Device dropdown, User button, 15 toggle buttons for lecture states, modifier rows (language incl.
+- `index.php` – Device dropdown, User button, 16 toggle buttons for lecture states (double click = "was happening
+  in the recent past", logged as event `recent`, the button stays off), modifier rows (language incl.
   Custom, fitness). Grey = off, blue = on. Toggle states survive a reload within the tab.
 - `user.php` – choose a known user (password) or create a new one; then optional metadata (gender, age,
   handedness, languages, vision, hearing, conditions, medication, sleep, caffeine, hair type, ...). Save -> index.php.
