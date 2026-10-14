@@ -1,0 +1,3 @@
+numpy==2.2.6
+pylsl>=1.16   # only for `eegact-headmap --lsl` (wheel bundles liblsl)
+# tkinter (python3-tk) for the head-map window; Pillow only for eegact-headmap --png

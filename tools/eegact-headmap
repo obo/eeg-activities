@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+"""eegact-headmap: tiny live head map (180x180 px) of EPOC X electrode connection and signal quality.
+
+Reads epoc-record-style CSV on stdin (header row, then timestamp_ns, timestamp_iso, 14 channels, 14 *_q columns)
+and draws a schematic EEG head (top view, nose up) with one indicator per electrode:
+  * thick outer ring = CONNECTION quality, decided live from the last ~0.5 s of raw signal
+      grey = no data, red = bad (flat / saturated / missing), orange = noisy (big jumps), green = ok
+  * inner dot = SIGNAL quality over the last 2 s ("does it look like EEG"), 0..1:
+      area of the dot ~ quality, colour red -> orange -> green; a perfect electrode is a fully green circle.
+The estimators live in class QualityEstimator; replace it (e.g. by a small neural network) with
+--estimator module:Class (same two methods).
+
+  some-producer | ./eegact-headmap            # normally started by eegact-record
+  ./eegact-headmap --lsl                       # read the EPOCX Lab Streaming Layer stream directly
+  ./eegact-headmap --demo                     # random mock qualities, no input
+  ./eegact-headmap --png out.png --scale 3    # render one mock frame to PNG (needs Pillow, no display)
+
+--lsl reads the 'EPOCX' stream published by `epoc-direct-record --lsl` (needs
+pylsl). That stream carries raw ADC counts; they are scaled to epoc-record's
+microvolt convention (LSL_ADC_TO_UV) so the same QualityEstimator applies.
+"""
+import argparse
+import importlib
+import math
+import random
+import sys
+import threading
+import time
+from collections import deque
+
+CHANNELS = ["AF3", "F7", "F3", "FC5", "T7", "P7", "O1", "O2", "P8", "T8", "FC6", "F4", "F8", "AF4"]
+# epoc-direct-record's LSL stream is raw 16-bit ADC counts (~32768 midscale).
+# epoc-record's CSV (what the QualityEstimator is tuned for) is microvolts at
+# the standard EPOC-X resolution 0.1275 uV/count (32768*0.1275 ~ 4178, matching
+# epoc-record's ~4200 DC offset), so scale LSL samples by this to reuse it.
+LSL_ADC_TO_UV = 0.1275
+SIZE = 180
+# Approximate 10-20 positions of the EPOC X electrodes, unit head radius, x to the right, y to the nose.
+# Slightly spread out (T7/T8 a bit down, AF3/AF4 a bit apart) so that the big indicators do not overlap.
+_LEFT = {"AF3": (-0.25, 0.86), "F7": (-0.82, 0.55), "F3": (-0.40, 0.42), "FC5": (-0.72, 0.12),
+         "T7": (-0.98, -0.25), "P7": (-0.72, -0.62), "O1": (-0.28, -0.90)}
+_MIRROR = {"AF4": "AF3", "F8": "F7", "F4": "F3", "FC6": "FC5", "T8": "T7", "P8": "P7", "O2": "O1"}
+POS = dict(_LEFT, **{r: (-_LEFT[l][0], _LEFT[l][1]) for r, l in _MIRROR.items()})
+
+GREY, RED, ORANGE, GREEN = "#9e9e9e", "#e53935", "#fb8c00", "#43a047"
+CONN_COLOURS = [GREY, RED, ORANGE, GREEN]  # connection level 0..3
+
+
+def mix(c1, c2, t):
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02x}" for x, y in zip(a, b))
+
+
+def quality_colour(q):
+    return mix(RED, ORANGE, q / 0.5) if q < 0.5 else mix(ORANGE, GREEN, (q - 0.5) / 0.5)
+
+
+class QualityEstimator:
+    """Hand-written rules; values are in the units of epoc-record (µV, DC offset around 4200)."""
+    CONN_WINDOW_S = 1.5
+    SIGNAL_WINDOW_S = 2.0
+    # Contact is judged by how each electrode tracks the whole-head common mode
+    # (the shared drift/reference every seated-on-head electrode carries) plus its
+    # Hjorth mobility (fs-free ~ mean frequency: floating electrodes are broadband
+    # and jittery). Both are scale-free, so a floating electrode is caught even
+    # when it is quiet (std ~7 uV) -- which is exactly where the old amplitude
+    # rules failed and reported a bare headset as "OK". Thresholds and smoothing
+    # were calibrated on a labelled on-head/off-head recording (see FINDINGS).
+    CORR_OK = 0.40      # per-1.5s-window corr-to-common-mode for a "good" vote
+    MOB_OK = 0.79       # Hjorth mobility below this for a "good" vote
+    FLAT_UV = 0.5       # peak-to-peak below this -> flat / shorted (always red)
+    SMOOTH = 0.12       # EMA factor per call (~200 ms tick) -> ~3 s smoothing
+    ONHEAD_VOTE = 0.30  # smoothed global good-vote fraction above this = on head
+    GREEN_VOTE = 0.40   # smoothed per-electrode good-vote fraction for green
+    ORANGE_VOTE = 0.10  # ... orange above this, red below (only truly-dead = red
+                        # on head; off-head electrodes are forced red by the gate)
+
+    def __init__(self):
+        # smoothed good-vote fractions: on-head ~0.67 global / 0.2-0.8 per
+        # electrode, off-head ~0.02 / <=0.37 -- so the gates below separate even
+        # though any single 1.5 s window is noisy. Start at 0 (assume off head).
+        self._ema_global = 0.0
+        self._ema = {ch: 0.0 for ch in CHANNELS}
+
+    def connection(self, x, q):
+        """Back-compat single-channel path (grey/red/orange/green) used only if a
+        custom estimator lacks ``connections``. Cannot see the common mode, so it
+        falls back to amplitude heuristics. Prefer ``connections`` (whole head)."""
+        vals = [v for v in x if v is not None]
+        if len(vals) < max(3, len(x) // 2):
+            return 0
+        lo, hi = min(vals), max(vals)
+        mean = sum(vals) / len(vals)
+        jumps = max((abs(b - a) for a, b in zip(vals, vals[1:])), default=0.0)
+        if hi - lo < 0.5 or mean < 1000 or mean > 7500:  # flat line or electrode railed / disconnected
+            level = 1
+        elif hi - lo > 600 or jumps > 250:                 # big jumps: loose contact, movement
+            level = 2
+        else:
+            level = 3
+        return min(level, q) if q is not None else level  # EmotivPRO's own contact quality as a cap
+
+    def connections(self, xs, q=None):
+        """Per-electrode connection level for all 14 channels at once (stateful).
+
+        Each call votes per electrode (corr-to-common-mode high AND mobility low =
+        "good"), smooths the votes over time (EMA), and uses the smoothed GLOBAL
+        good-vote fraction as an on-head gate: below it, the device is off the
+        head and every electrode is red -- even a quiet floating one. On the head,
+        each electrode's own smoothed vote grades it green/orange/red, so a single
+        lifted electrode still shows while the rest stay good.
+
+        xs: {ch: samples of the last CONN_WINDOW_S (None = missing)}.
+        q: optional {ch: EmotivPRO contact quality 0-3} cap (None in LSL mode).
+        Returns {ch: 0 grey / 1 red / 2 orange / 3 green}.
+        """
+        import numpy as np
+        n = min((sum(v is not None for v in xs.get(ch, [])) for ch in CHANNELS), default=0)
+        if n < 128:  # not enough data yet to judge contact -> grey, hold EMAs
+            return {ch: 0 for ch in CHANNELS}
+        M = np.array([[v for v in xs[ch] if v is not None][-n:] for ch in CHANNELS], float)
+        M = M - M.mean(1, keepdims=True)
+        sd = M.std(1)
+        cm = M.mean(0)
+        cor = np.nan_to_num([np.corrcoef(M[i], cm)[0, 1] if sd[i] > 1e-6 else 0.0
+                             for i in range(len(CHANNELS))])
+        mob = np.array([np.std(np.diff(M[i])) / (sd[i] + 1e-9) for i in range(len(CHANNELS))])
+        p2p = M.max(1) - M.min(1)
+        good = (cor >= self.CORR_OK) & (mob <= self.MOB_OK)
+        # smooth the per-electrode and global good-vote fractions over time
+        for i, ch in enumerate(CHANNELS):
+            self._ema[ch] += self.SMOOTH * (float(good[i]) - self._ema[ch])
+        g_vote = float((np.median(cor) >= self.CORR_OK) and (np.median(mob) <= self.MOB_OK))
+        self._ema_global += self.SMOOTH * (g_vote - self._ema_global)
+        onhead = self._ema_global >= self.ONHEAD_VOTE
+        out = {}
+        for i, ch in enumerate(CHANNELS):
+            if p2p[i] < self.FLAT_UV or not onhead:  # flat/shorted, or device off head
+                lvl = 1
+            elif self._ema[ch] >= self.GREEN_VOTE:
+                lvl = 3
+            elif self._ema[ch] >= self.ORANGE_VOTE:
+                lvl = 2
+            else:                                    # this electrode is off/floating
+                lvl = 1
+            if q and q.get(ch) is not None:
+                lvl = min(lvl, q[ch])
+            out[ch] = lvl
+        return out
+
+    def signal(self, x, fs):
+        """x: samples of the last SIGNAL_WINDOW_S (None = missing), fs: sampling rate. Returns 0..1."""
+        import numpy as np
+        vals = np.array([v for v in x if v is not None], dtype=float)
+        if len(vals) < 0.5 * len(x) or len(vals) < 32:
+            return 0.0
+        present = len(vals) / len(x)
+        v = vals - np.linspace(vals[:8].mean(), vals[-8:].mean(), len(vals))  # remove offset and slow drift
+        sd = v.std()
+        if sd < 0.5:
+            return 0.0
+        # amplitude: resting EEG is a few to a few tens of µV
+        amp = 1.0 if 2 <= sd <= 60 else max(0.0, 1 - abs(math.log(sd / (2 if sd < 2 else 60))) / 1.5)
+        # artifacts: share of samples far from the median (blinks, movement, pops)
+        art = float(np.mean(np.abs(v - np.median(v)) > max(100.0, 6 * sd)))
+        # spectrum: EEG power is mostly 1-30 Hz; penalise line noise (50 Hz) and broadband/high-frequency noise
+        p = np.abs(np.fft.rfft(v * np.hanning(len(v)))) ** 2
+        f = np.fft.rfftfreq(len(v), 1 / fs)
+        tot = p[f >= 1].sum() + 1e-9
+        eeg = p[(f >= 1) & (f <= 30)].sum() / tot
+        line = p[(f >= 48) & (f <= 52)].sum() / tot
+        spec = min(1.0, eeg / 0.8) * (1 - min(1.0, line / 0.5))
+        return float(max(0.0, min(1.0, present * amp * (1 - min(1.0, art * 5)) * spec)))
+
+
+# ---------------------------------------------------------------- drawing (tk canvas or PIL, same code)
+def draw(p, conn, sig, scale=1.0, labels=True):
+    """p: painter with oval/line/polygon/text; conn: {ch: 0..3}; sig: {ch: 0..1 or None}."""
+    s = scale
+    cx, cy, R = 90 * s, 95 * s, 66 * s
+    er, ring = 13 * s, 4 * s  # electrode indicator radius and ring width
+    p.polygon([(cx - 9 * s, cy - R + 2 * s), (cx, cy - R - 12 * s), (cx + 9 * s, cy - R + 2 * s)],
+              fill="#f5f5f5", outline="#555555", width=max(1, round(1.5 * s)))          # nose
+    for side in (-1, 1):                                                                  # ears
+        x = cx + side * R
+        p.oval(x - 7 * s, cy - 15 * s, x + 7 * s, cy + 15 * s, fill="#f5f5f5", outline="#555555",
+               width=max(1, round(1.5 * s)))
+    p.oval(cx - R, cy - R, cx + R, cy + R, fill="#f5f5f5", outline="#555555", width=max(1, round(1.5 * s)))
+    for ch in CHANNELS:
+        ux, uy = POS[ch]
+        x, y = cx + ux * R * 0.93, cy - uy * R * 0.93
+        c = conn.get(ch, 0)
+        p.oval(x - er, y - er, x + er, y + er, fill="#ffffff", outline=CONN_COLOURS[c], width=round(ring))
+        q = sig.get(ch)
+        if q:
+            r = (er - ring) * math.sqrt(q) + 0.5 * s  # area ~ quality; q = 1 fills the ring completely
+            p.oval(x - r, y - r, x + r, y + r, fill=quality_colour(q), outline="", width=0)
+        if labels:
+            p.text(x, y, ch, size=max(5, round(6 * s)))
+
+
+class TkPainter:
+    def __init__(self, canvas):
+        self.c = canvas
+
+    def oval(self, x0, y0, x1, y1, fill, outline, width):
+        self.c.create_oval(x0, y0, x1, y1, fill=fill, outline=outline, width=width)
+
+    def polygon(self, pts, fill, outline, width):
+        self.c.create_polygon([v for pt in pts for v in pt], fill=fill, outline=outline, width=width)
+
+    def text(self, x, y, t, size):
+        self.c.create_text(x, y, text=t, fill="#212121", font=("Helvetica", -size, "bold"))
+
+
+class PilPainter:
+    def __init__(self, img):
+        from PIL import ImageDraw
+        self.d = ImageDraw.Draw(img)
+
+    def oval(self, x0, y0, x1, y1, fill, outline, width):
+        self.d.ellipse([x0, y0, x1, y1], fill=fill, outline=outline or None, width=width)
+
+    def polygon(self, pts, fill, outline, width):
+        self.d.polygon(pts, fill=fill, outline=outline, width=width)
+
+    def text(self, x, y, t, size):
+        from PIL import ImageFont
+        try:
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+        except OSError:
+            font = ImageFont.load_default()
+        self.d.text((x, y), t, fill="#212121", font=font, anchor="mm")
+
+
+def mock():
+    conn, sig = {}, {}
+    for ch in CHANNELS:
+        conn[ch] = random.choices([0, 1, 2, 3], [1, 1, 2, 8])[0]
+        sig[ch] = None if conn[ch] == 0 else round(random.random() ** 0.5 * (conn[ch] / 3), 2)
+    conn["AF3"], sig["AF3"] = 3, 1.0  # one perfect electrode
+    return conn, sig
+
+
+# ---------------------------------------------------------------- live input
+class Buffers:
+    def __init__(self, seconds=4.0):
+        self.lock = threading.Lock()
+        self.seconds = seconds
+        self.t = deque()
+        self.x = {ch: deque() for ch in CHANNELS}
+        self.q = {ch: None for ch in CHANNELS}
+        self.idx = None
+        self.last_rx = 0.0
+
+    def read(self, stream):
+        for line in stream:
+            f = line.rstrip("\n").split(",")
+            if self.idx is None or f[0] == "timestamp_ns":
+                if f[0] == "timestamp_ns":
+                    self.idx = {name: i for i, name in enumerate(f)}
+                    continue
+                self.idx = {name: i for i, name in enumerate(["timestamp_ns", "timestamp_iso"] + CHANNELS +
+                                                             [c + "_q" for c in CHANNELS])}
+            try:
+                t = int(f[0]) / 1e9
+            except (ValueError, IndexError):
+                continue
+            with self.lock:
+                self.t.append(t)
+                for ch in CHANNELS:
+                    self.x[ch].append(_num(f, self.idx.get(ch)))
+                    qv = _num(f, self.idx.get(ch + "_q"))
+                    if qv is not None:
+                        self.q[ch] = int(qv)
+                while self.t and self.t[0] < t - self.seconds:
+                    self.t.popleft()
+                    for ch in CHANNELS:
+                        self.x[ch].popleft()
+                self.last_rx = time.time()
+
+    def read_lsl(self, name="EPOCX", scale=LSL_ADC_TO_UV):
+        """Fill the same buffers from the 'EPOCX' Lab Streaming Layer stream.
+
+        Resolves the stream by name, maps its channel labels to our 14
+        electrodes, and appends each sample (scaled ADC->uV). Contact-quality
+        hints stay None (the raw stream carries no per-electrode quality), so
+        the estimator works purely from the signal.
+        """
+        from pylsl import StreamInlet, resolve_byprop
+        print(f"# resolving LSL stream '{name}' ...", file=sys.stderr, flush=True)
+        streams = resolve_byprop("name", name, timeout=5.0)
+        if not streams:
+            print(f"# no LSL stream '{name}' found (is `epoc-direct-record --lsl` running?)",
+                  file=sys.stderr, flush=True)
+            return
+        inlet = StreamInlet(streams[0], recover=True)
+        info = inlet.info()
+        labels, ch = [], info.desc().child("channels").child("channel")
+        while not ch.empty():
+            labels.append(ch.child_value("label"))
+            ch = ch.next_sibling()
+        idx = {lab: i for i, lab in enumerate(labels)}
+        chan_idx = {c: idx.get(c) for c in CHANNELS}
+        if all(i is None for i in chan_idx.values()):  # no labels -> assume our order
+            chan_idx = {c: 2 + i for i, c in enumerate(CHANNELS)}  # after packet_size,frame_counter
+        print(f"# connected to '{info.name()}' ({info.channel_count()} ch)",
+              file=sys.stderr, flush=True)
+        while True:
+            sample, ts = inlet.pull_sample(timeout=1.0)
+            if sample is None:
+                continue
+            t = ts if ts and ts > 1e9 else time.time()
+            with self.lock:
+                self.t.append(t)
+                for c in CHANNELS:
+                    i = chan_idx.get(c)
+                    v = sample[i] if (i is not None and i < len(sample)) else None
+                    if v is None or v != v:  # missing or NaN
+                        v = None
+                    else:
+                        v = v * scale
+                    self.x[c].append(v)
+                while self.t and self.t[0] < t - self.seconds:
+                    self.t.popleft()
+                    for c in CHANNELS:
+                        self.x[c].popleft()
+                self.last_rx = time.time()
+
+    def window(self, seconds):
+        """Samples of the last `seconds` per channel, sampling rate, last contact quality."""
+        with self.lock:
+            if not self.t or time.time() - self.last_rx > 1.5:  # stream stalled
+                return None, 0.0, {}
+            n = sum(1 for t in self.t if t >= self.t[-1] - seconds)
+            span = self.t[-1] - self.t[0]
+            fs = (len(self.t) - 1) / span if span > 0 else 128.0
+            return {ch: list(self.x[ch])[-n:] for ch in CHANNELS}, fs, dict(self.q)
+
+
+def _num(f, i):
+    try:
+        return float(f[i]) if i is not None and f[i] != "" else None
+    except (ValueError, IndexError):
+        return None
+
+
+def run_gui(args, est):
+    import tkinter as tk
+    root = tk.Tk()
+    root.title("eegact")
+    root.geometry(f"{SIZE}x{SIZE}")
+    root.resizable(False, False)
+    if args.on_top:
+        root.attributes("-topmost", True)
+    canvas = tk.Canvas(root, width=SIZE, height=SIZE, bg="#ffffff", highlightthickness=0)
+    canvas.pack()
+    painter = TkPainter(canvas)
+    buf = None
+    if not args.demo:
+        buf = Buffers()
+        if getattr(args, "lsl", False):
+            threading.Thread(target=buf.read_lsl, args=(args.lsl_name,), daemon=True).start()
+        else:
+            threading.Thread(target=buf.read, args=(sys.stdin,), daemon=True).start()
+    state = {"conn": {}, "sig": {}, "last_sig": 0.0}
+
+    def tick():
+        now = time.time()
+        if args.demo:
+            state["conn"], state["sig"] = mock()
+        else:
+            xs, fs, q = buf.window(est.CONN_WINDOW_S)
+            if not xs:
+                state["conn"] = {}
+            elif hasattr(est, "connections"):
+                state["conn"] = est.connections(xs, q)
+            else:
+                state["conn"] = {ch: est.connection(xs[ch], q.get(ch)) for ch in CHANNELS}
+            if now - state["last_sig"] >= 0.5:
+                state["last_sig"] = now
+                xs, fs, _ = buf.window(est.SIGNAL_WINDOW_S)
+                state["sig"] = {ch: est.signal(xs[ch], fs) for ch in CHANNELS} if xs else {}
+        canvas.delete("all")
+        draw(painter, state["conn"], state["sig"], labels=not args.no_labels)
+        root.after(1000 if args.demo else 200, tick)
+
+    tick()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--demo", action="store_true", help="random mock qualities instead of stdin")
+    ap.add_argument("--lsl", action="store_true",
+                    help="read the EPOCX Lab Streaming Layer stream instead of stdin CSV (needs pylsl)")
+    ap.add_argument("--lsl-name", default="EPOCX", help="LSL stream name to resolve (default EPOCX)")
+    ap.add_argument("--png", help="render one mock frame to this PNG and exit (Pillow)")
+    ap.add_argument("--scale", type=float, default=1.0, help="scale of the --png rendering (1 = 180x180)")
+    ap.add_argument("--seed", type=int, default=4)
+    ap.add_argument("--no-labels", action="store_true", help="do not print electrode names")
+    ap.add_argument("--on-top", action="store_true", help="keep the window above other windows")
+    ap.add_argument("--estimator", help="module:Class replacing QualityEstimator")
+    a = ap.parse_args()
+    random.seed(a.seed)
+    if a.png:
+        from PIL import Image
+        img = Image.new("RGB", (round(SIZE * a.scale),) * 2, "#ffffff")
+        draw(PilPainter(img), *mock(), scale=a.scale, labels=not a.no_labels)
+        img.save(a.png)
+        return
+    est = QualityEstimator()
+    if a.estimator:
+        mod, cls = a.estimator.split(":")
+        est = getattr(importlib.import_module(mod), cls)()
+    run_gui(a, est)
+
+
+if __name__ == "__main__":
+    main()
