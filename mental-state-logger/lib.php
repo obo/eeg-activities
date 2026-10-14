@@ -11,35 +11,101 @@ const USERS_FILE = DATA_DIR . '/users.json';
 const EVENTS_FILE = DATA_DIR . '/events.csv';
 const FEED_KEY_FILE = DATA_DIR . '/feed-key.txt';  // optional shared secret for feed-status-image.php
 
-// Metadata stored for each user (all optional). name => [label, type, options]
+// Metadata stored for each user (all optional). name => [type, options]; labels: 'fields' / 'options' in languages/*.php
 const USER_FIELDS = [
-    'gender'          => ['Gender', 'select', ['', 'female', 'male', 'non-binary', 'other', 'prefer not to say']],
-    'age'             => ['Age (years)', 'number', null],
-    'handedness'      => ['Handedness', 'select', ['', 'right', 'left', 'ambidextrous']],
-    'mother_tongue'   => ['Mother tongue', 'text', null],
-    'other_languages' => ['Other languages (with level)', 'text', null],
-    'education'       => ['Highest education', 'select', ['', 'primary', 'secondary', 'bachelor', 'master', 'doctorate']],
-    'field_of_study'  => ['Field of study / work', 'text', null],
-    'vision'          => ['Vision', 'select', ['', 'normal', 'corrected (glasses)', 'corrected (contact lenses)', 'impaired']],
-    'hearing'         => ['Hearing', 'select', ['', 'normal', 'impaired', 'hearing aid']],
-    'neuro_conditions'=> ['Neurological / psychiatric conditions (e.g. epilepsy, ADHD, migraine)', 'text', null],
-    'medication'      => ['Medication affecting the nervous system', 'text', null],
-    'hair_type'       => ['Hair (for electrode contact)', 'select', ['', 'none / very short', 'short', 'medium', 'long', 'thick / curly', 'braids / dreadlocks']],
-    'head_circumference' => ['Head circumference (cm)', 'number', null],
-    'musical_training'=> ['Musical training (years)', 'number', null],
-    'meditation'      => ['Meditation practice', 'select', ['', 'never', 'occasionally', 'regularly']],
-    'usual_sleep'     => ['Usual sleep per night (hours)', 'number', null],
-    'sleep_last_night'=> ['Sleep last night (hours)', 'number', null],
-    'caffeine_today'  => ['Caffeine today (cups, last one when)', 'text', null],
-    'nicotine'        => ['Nicotine use', 'select', ['', 'no', 'occasionally', 'daily']],
-    'alcohol_24h'     => ['Alcohol in the last 24 h', 'select', ['', 'no', 'a little', 'more']],
-    'notes'           => ['Other notes', 'textarea', null],
+    'gender'          => ['select', ['', 'female', 'male', 'non-binary', 'other', 'prefer not to say']],
+    'age'             => ['number', null],
+    'handedness'      => ['select', ['', 'right', 'left', 'ambidextrous']],
+    'mother_tongue'   => ['text', null],
+    'other_languages' => ['text', null],
+    'education'       => ['select', ['', 'primary', 'secondary', 'bachelor', 'master', 'doctorate']],
+    'field_of_study'  => ['text', null],
+    'vision'          => ['select', ['', 'normal', 'corrected (glasses)', 'corrected (contact lenses)', 'impaired']],
+    'hearing'         => ['select', ['', 'normal', 'impaired', 'hearing aid']],
+    'neuro_conditions'=> ['text', null],
+    'medication'      => ['text', null],
+    'hair_type'       => ['select', ['', 'none / very short', 'short', 'medium', 'long', 'thick / curly', 'braids / dreadlocks']],
+    'head_circumference' => ['number', null],
+    'musical_training'=> ['number', null],
+    'meditation'      => ['select', ['', 'never', 'occasionally', 'regularly']],
+    'usual_sleep'     => ['number', null],
+    'sleep_last_night'=> ['number', null],
+    'caffeine_today'  => ['text', null],
+    'nicotine'        => ['select', ['', 'no', 'occasionally', 'daily']],
+    'alcohol_24h'     => ['select', ['', 'no', 'a little', 'more']],
+    'notes'           => ['textarea', null],
 ];
+
+const LANG_DIR = __DIR__ . '/languages';     // <code>.php returns an array of UI strings; en.php is the default
+const STALE_AFTER_S = 3;                     // status image older than this (feeder silent) -> "no connection"
 
 function start_session(): void {
     if (session_status() !== PHP_SESSION_ACTIVE) {
         session_start();
     }
+    // interface language: ?lang=xx (from the language menu) is remembered in the session and a cookie
+    $lang = $_GET['lang'] ?? null;
+    if (is_string($lang) && preg_match('/^[a-z]{2,3}$/', $lang) && is_file(LANG_DIR . "/$lang.php")) {
+        $_SESSION['lang'] = $lang;
+        setcookie('msl_lang', $lang, time() + 365 * 86400);
+    } elseif (!isset($_SESSION['lang']) && preg_match('/^[a-z]{2,3}$/', $_COOKIE['msl_lang'] ?? '')
+              && is_file(LANG_DIR . '/' . $_COOKIE['msl_lang'] . '.php')) {
+        $_SESSION['lang'] = $_COOKIE['msl_lang'];
+    }
+}
+
+function ui_lang(): string {
+    return $_SESSION['lang'] ?? 'en';
+}
+
+// UI strings of the current language, English as the fallback (nested arrays are merged per key).
+function strings(): array {
+    static $L = null;
+    if ($L === null) {
+        $L = require LANG_DIR . '/en.php';
+        if (ui_lang() !== 'en') {
+            $T = require LANG_DIR . '/' . ui_lang() . '.php';
+            foreach ($T as $k => $v) {
+                $L[$k] = is_array($v) && is_array($L[$k] ?? null) ? array_replace($L[$k], $v) : $v;
+            }
+        }
+    }
+    return $L;
+}
+
+function t(string $key, ?string $sub = null): string {
+    $v = strings()[$key] ?? $key;
+    if ($sub !== null) {
+        $v = is_array($v) ? ($v[$sub] ?? $sub) : $sub;
+    }
+    return (string)$v;
+}
+
+// English label of a button: this is what gets logged, whatever the interface language.
+function en(string $key, string $sub): string {
+    static $E = null;
+    if ($E === null) {
+        $E = require LANG_DIR . '/en.php';
+    }
+    return (string)($E[$key][$sub] ?? $sub);
+}
+
+function available_languages(): array {
+    $out = [];
+    foreach (glob(LANG_DIR . '/*.php') as $f) {
+        $out[basename($f, '.php')] = (require $f)['lang_name'] ?? basename($f, '.php');
+    }
+    return $out;
+}
+
+// mbstring may be missing on the server: count / cut UTF-8 characters with PCRE instead.
+function utf8_len(string $s): int {
+    return preg_match_all('/./su', $s);
+}
+
+function utf8_cut(string $s, int $n): string {
+    preg_match('/^.{0,' . $n . '}/su', $s, $m);
+    return $m[0] ?? '';
 }
 
 function h($s): string {
@@ -95,9 +161,22 @@ function log_event(string $event, string $detail = '', string $page = '', string
     fclose($fh);
 }
 
-// Top-right live status image of the selected device (updated by status.js).
-function status_image_html(): string {
+// Top right: interface language menu and the live status image of the selected device (updated by common.js;
+// the overlay with the broken-connection icon is shown when the server or the feeder is not reachable).
+function header_right_html(): string {
+    $menu = '<select id="ui-lang" name="ui-lang" title="' . h(t('ui_language')) . '">';
+    foreach (available_languages() as $code => $name) {
+        $menu .= '<option value="' . h($code) . '"' . ($code === ui_lang() ? ' selected' : '') . '>' . h($name) . '</option>';
+    }
+    $menu .= '</select>';
     $dev = $_SESSION['device'] ?? '';
     $src = isset(DEVICES[$dev]) ? 'devices/status-image-' . $dev . '.png' : 'devices/no-device.png';
-    return '<img id="status-image" width="180" height="180" alt="device status" src="' . h($src) . '" data-device="' . h($dev) . '">';
+    return '<div class="header-right">' . $menu
+        . '<div class="status" id="status" data-stale-after="' . STALE_AFTER_S . '">'
+        . '<img id="status-image" width="180" height="180" alt="' . h(t('status_alt')) . '" src="' . h($src) . '" data-device="' . h($dev) . '">'
+        . '<div class="lost-overlay"><svg viewBox="0 0 64 64" width="72" height="72" aria-hidden="true">'
+        . '<g fill="none" stroke="#c62828" stroke-width="5" stroke-linecap="round">'
+        . '<path d="M27 37l-8 8a7 7 0 0 1-10-10l8-8"/><path d="M37 27l8-8a7 7 0 0 1 10 10l-8 8"/>'
+        . '<path d="M24 22l-4-6M22 26l-7-2M40 42l4 6M42 38l7 2"/></g></svg>'
+        . '<span>' . h(t('no_connection')) . '</span></div></div></div>';
 }

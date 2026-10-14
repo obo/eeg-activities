@@ -11,9 +11,9 @@ if ($action === 'login') {
     $name = trim((string)($_POST['username'] ?? ''));
     $users = with_users();
     if (!isset($users[$name])) {
-        $msg = 'Choose a user from the list.';
+        $msg = 'msg_choose_user';
     } elseif ((string)($users[$name]['password'] ?? '') !== (string)($_POST['password'] ?? '')) {
-        $msg = 'Wrong password.';
+        $msg = 'msg_wrong_password';
         log_event('login-failed', $name, 'user.php');
     } else {
         $_SESSION['user'] = $name;
@@ -22,12 +22,12 @@ if ($action === 'login') {
 } elseif ($action === 'create') {
     $name = trim(preg_replace('/\s+/u', ' ', (string)($_POST['new_username'] ?? '')));
     $pw = (string)($_POST['new_password'] ?? '');
-    if ($name === '' || mb_strlen($name) > 40) {
-        $msg = 'Enter a user name (max. 40 characters).';
+    if ($name === '' || utf8_len($name) > 40) {
+        $msg = 'msg_user_name';
     } elseif ($pw === '') {
-        $msg = 'Choose a password for the new user.';
+        $msg = 'msg_choose_password';
     } elseif ($pw !== (string)($_POST['new_password2'] ?? '')) {
-        $msg = 'The two passwords differ.';
+        $msg = 'msg_passwords_differ';
     } else {
         $created = false;
         with_users(function ($users) use ($name, $pw, &$created) {
@@ -42,7 +42,7 @@ if ($action === 'login') {
             $_SESSION['user'] = $name;
             log_event('user-created', $name, 'user.php');
         } else {
-            $msg = 'This user name exists already; choose it from the list.';
+            $msg = 'msg_user_exists';
         }
     }
 } elseif ($action === 'save' && isset($_SESSION['user'])) {
@@ -51,7 +51,7 @@ if ($action === 'login') {
     foreach (USER_FIELDS as $f => $_) {
         $v = trim((string)($_POST[$f] ?? ''));
         if ($v !== '') {
-            $meta[$f] = mb_substr($v, 0, 2000);
+            $meta[$f] = utf8_cut($v, 2000);
         }
     }
     with_users(function ($users) use ($name, $meta) {
@@ -83,55 +83,55 @@ $names = array_keys($users);
 natcasesort($names);
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="<?= h(ui_lang()) ?>">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>User – mental state logger</title>
+<title><?= h(t('user') . ' – ' . t('title')) ?></title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body data-page="user.php">
 <header>
   <div class="controls">
-    <a class="button" href="index.php" data-name="Back">&larr; Back</a>
-    <span class="title">User<?= $user !== '' ? ': <b>' . h($user) . '</b>' : '' ?></span>
+    <a class="button" href="index.php" data-name="Back">&larr; <?= h(t('back')) ?></a>
+    <span class="title"><?= h(t('user')) ?><?= $user !== '' ? ': <b>' . h($user) . '</b>' : '' ?></span>
   </div>
-  <?= status_image_html() ?>
+  <?= header_right_html() ?>
 </header>
 
 <main class="subform">
-<?php if ($msg !== ''): ?><p class="msg"><?= h($msg) ?></p><?php endif; ?>
+<?php if ($msg !== ''): ?><p class="msg"><?= h(t($msg)) ?></p><?php endif; ?>
 
 <?php if ($user === ''): ?>
   <div class="cols">
     <form method="post" class="box">
-      <h2>Known user</h2>
+      <h2><?= h(t('known_user')) ?></h2>
       <select name="username" size="12" class="userlist" required>
         <?php foreach ($names as $n): ?>
           <option value="<?= h($n) ?>"><?= h($n) ?></option>
         <?php endforeach; ?>
       </select>
-      <label>Password <input type="password" name="password" autocomplete="off"></label>
-      <button name="action" value="login" data-name="Log in">Log in</button>
+      <label><?= h(t('password')) ?> <input type="password" name="password" autocomplete="off"></label>
+      <button name="action" value="login" data-name="Log in"><?= h(t('log_in')) ?></button>
     </form>
     <form method="post" class="box">
-      <h2>New user</h2>
-      <label>User name <input name="new_username" maxlength="40" autocomplete="off"></label>
-      <label>Password <input type="password" name="new_password" autocomplete="new-password"></label>
-      <label>Password again <input type="password" name="new_password2" autocomplete="new-password"></label>
-      <p class="hint">A light password, only so that nobody uses your account by mistake. It is stored unencrypted.</p>
-      <button name="action" value="create" data-name="Create user">Create user</button>
+      <h2><?= h(t('new_user')) ?></h2>
+      <label><?= h(t('user_name')) ?> <input name="new_username" maxlength="40" autocomplete="off"></label>
+      <label><?= h(t('password')) ?> <input type="password" name="new_password" autocomplete="new-password"></label>
+      <label><?= h(t('password_again')) ?> <input type="password" name="new_password2" autocomplete="new-password"></label>
+      <p class="hint"><?= h(t('password_hint')) ?></p>
+      <button name="action" value="create" data-name="Create user"><?= h(t('create_user')) ?></button>
     </form>
   </div>
 <?php else: ?>
   <form method="post" class="box meta">
-    <p class="hint">All fields are optional.</p>
-    <?php foreach (USER_FIELDS as $f => [$label, $type, $opts]): $v = $meta[$f] ?? ''; ?>
-      <label><span><?= h($label) ?></span>
+    <p class="hint"><?= h(t('optional_hint')) ?></p>
+    <?php foreach (USER_FIELDS as $f => [$type, $opts]): $v = $meta[$f] ?? ''; ?>
+      <label><span><?= h(t('fields', $f)) ?></span>
         <?php if ($type === 'select'): ?>
           <select name="<?= h($f) ?>">
             <?php foreach ($opts as $o): ?>
-              <option value="<?= h($o) ?>"<?= $o === $v ? ' selected' : '' ?>><?= $o === '' ? '–' : h($o) ?></option>
+              <option value="<?= h($o) ?>"<?= $o === $v ? ' selected' : '' ?>><?= h(t('options', $o)) ?></option>
             <?php endforeach; ?>
           </select>
         <?php elseif ($type === 'textarea'): ?>
@@ -142,8 +142,8 @@ natcasesort($names);
       </label>
     <?php endforeach; ?>
     <div class="dialog-buttons">
-      <button name="action" value="logout" data-name="Switch user" formnovalidate>Switch user</button>
-      <button name="action" value="save" data-name="Save" class="primary">Save</button>
+      <button name="action" value="logout" data-name="Switch user" formnovalidate><?= h(t('switch_user')) ?></button>
+      <button name="action" value="save" data-name="Save" class="primary"><?= h(t('save')) ?></button>
     </div>
   </form>
 <?php endif; ?>

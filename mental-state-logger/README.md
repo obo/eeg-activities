@@ -23,5 +23,12 @@ current mental state during a lecture. No database, no PHP extensions beyond the
 - `make-mock-images.py` – mock frames for the 3 devices (drawn with eeg-activities/eegact/eegact-headmap).
 
 Devices and user metadata fields are configured at the top of `lib.php`.
+
+Interface language: menu top right (left of the status image) -> `?lang=xx`, remembered in the session and a
+cookie. Strings are in `languages/<code>.php` (PHP files returning an array; `en.php` is the default and the
+fallback, `cs.php` Czech); a new language = a new file with the same keys. Logged button names are always the
+English labels. The status image is overlaid with a broken-connection icon when the server is unreachable, the
+image is missing, or the feeder has not sent a frame for `STALE_AFTER_S` (3 s; judged from the server's
+`Date` vs. `Last-Modified` headers).
 Setup: the web server user needs write access to `data/` and `devices/` (here: setfacl u:www-data:rwx);
 `data/.htaccess` denies web access to users.json and events.csv (Apache; for nginx add an equivalent rule).
