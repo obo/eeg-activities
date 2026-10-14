@@ -26,8 +26,10 @@ the Bluetooth name) and each head map picks one with --lsl-name:
   ./eegact-headmap --lsl --lsl-name 'EPOCX (E5021270)' --geometry +0+0
 
 A Muse headband (stream of `muse-record --lsl`) is shown with --layout muse
-(its 4 electrodes TP9 AF7 AF8 TP10, already in uV, orientation from the
-accelerometer only, so no yaw); --layout defaults to muse for --device muse*:
+(its 4 electrodes TP9 AF7 AF8 TP10, already in uV, plus REF = its DRL/REF
+reference electrodes at the centre of the forehead, which only get a contact
+ring; orientation from the accelerometer only, so no yaw). Its contact rings
+come from MuseQualityEstimator; --layout defaults to muse for --device muse*:
 
   ./eegact-headmap --lsl --lsl-name Muse --device muse1 --send-to=...
 
@@ -71,28 +73,35 @@ POS = dict(_LEFT, **{r: (-_LEFT[l][0], _LEFT[l][1]) for r, l in _MIRROR.items()}
 # assignments are provisional -- swap/flip here after a tilt/turn test.
 GRAV_CH = ("MOT0", "MOT1", "MOT2")
 MAG_CH = ("MOT3", "MOT4", "MOT5")
-MOTION_CHANNELS = [f"MOT{i}" for i in range(7)]
+MOTION_CHANNELS = [f"MOT{i}" for i in range(7)]  # channels whose latest value is kept (Buffers.motion())
+EXTRA_CONTACTS = []  # contact-only indicators (no EEG signal) drawn besides CHANNELS, e.g. Muse's REF
 ORIENT_RANGE = {"Y": 180.0, "P": 90.0, "R": 180.0}  # full-scale of each bar, degrees
 
 # Per-device layouts; use_layout() switches the module globals above (before anything is set up).
-# Muse: its 4 electrodes (as in mental-state-logger/make-mock-images.py), samples already in uV,
-# accelerometer ax/ay/az (g) as the gravity vector (axis assignment provisional, as for the EPOC),
-# no magnetometer -> no yaw.
+# Muse: its 4 electrodes (as in mental-state-logger/make-mock-images.py) and REF, the DRL/REF
+# reference electrodes in the centre of the forehead (judged from muse-record's drl/ref values,
+# kept as latest values); samples already in uV; accelerometer ax/ay/az (g) as the gravity
+# vector (axis assignment provisional, as for the EPOC), no magnetometer -> no yaw.
 LAYOUTS = {
-    "epocx": dict(channels=list(CHANNELS), pos=dict(POS), lsl_scale=LSL_ADC_TO_UV,
-                  grav=GRAV_CH, mag=MAG_CH, motion=list(MOTION_CHANNELS)),
-    "muse": dict(channels=["TP9", "AF7", "AF8", "TP10"],
-                 pos={"TP9": (-0.92, -0.45), "AF7": (-0.55, 0.72), "AF8": (0.55, 0.72), "TP10": (0.92, -0.45)},
-                 lsl_scale=1.0, grav=("ax", "ay", "az"), mag=(), motion=["ax", "ay", "az"]),
+    "epocx": dict(channels=list(CHANNELS), extra=[], pos=dict(POS), lsl_scale=LSL_ADC_TO_UV,
+                  grav=GRAV_CH, mag=MAG_CH, motion=list(MOTION_CHANNELS), estimator="QualityEstimator"),
+    "muse": dict(channels=["TP9", "AF7", "AF8", "TP10"], extra=["REF"],
+                 pos={"TP9": (-0.92, -0.45), "AF7": (-0.55, 0.72), "AF8": (0.55, 0.72), "TP10": (0.92, -0.45),
+                      "REF": (0.0, 0.90)},
+                 lsl_scale=1.0, grav=("ax", "ay", "az"), mag=(), motion=["ax", "ay", "az", "drl", "ref"],
+                 estimator="MuseQualityEstimator"),
 }
+LAYOUT = "epocx"
 
 
 def use_layout(name):
-    global POS, LSL_ADC_TO_UV, GRAV_CH, MAG_CH
+    global POS, LSL_ADC_TO_UV, GRAV_CH, MAG_CH, LAYOUT
     lay = LAYOUTS[name]
     CHANNELS[:] = lay["channels"]
+    EXTRA_CONTACTS[:] = lay["extra"]
     MOTION_CHANNELS[:] = lay["motion"]
     POS, LSL_ADC_TO_UV, GRAV_CH, MAG_CH = lay["pos"], lay["lsl_scale"], lay["grav"], lay["mag"]
+    LAYOUT = name
 
 
 def orientation(mot):
@@ -250,6 +259,73 @@ class QualityEstimator:
         return float(max(0.0, min(1.0, present * amp * (1 - min(1.0, art * 5)) * spec)))
 
 
+class MuseQualityEstimator(QualityEstimator):
+    """Contact rings of a Muse; signal() (the inner dot) is QualityEstimator's, as for the EPOC X.
+
+    The EPOC X rule (correlation with the common mode) does not carry over: a Muse electrode in the
+    air picks up the same mains hum as its neighbours, so it correlates well with them. What separates
+    contact from no contact on a Muse is plain noise, measured per electrode in the last
+    CONN_WINDOW_S, smoothed over ~3 s (log-domain EMA, as QualityEstimator.SMOOTH):
+      * mains hum (45-65 Hz rms) and high-frequency noise (65-128 Hz rms): off the head
+        ~500-1100 and ~200-600 uV, worn with good contact ~5-15 and ~3-8 uV;
+      * railing: off the head the ADC sits at both ends of its +-1000 uV range;
+      * slow activity (1-30 Hz rms) far above EEG: movement / a loose electrode.
+    REF, the DRL/REF electrodes in the centre of the forehead, rails at about +970 / -950 off the
+    head and reads within some tens of uV when it touches the skin. Without REF contact, no EEG
+    electrode can be in contact either, so they are all red then (as Muse's own horseshoe does).
+    Thresholds from a Muse 2 recorded off the head and worn (2026-10-14, see the commit message).
+    """
+    FS = 256.0                       # Muse EEG rate
+    RAIL_P2P = 1500.0                # peak-to-peak (uV) above this = railed
+    LINE_OK, LINE_BAD = 20.0, 70.0   # mains 45-65 Hz rms (uV): green below OK, red above BAD
+    HF_OK, HF_BAD = 10.0, 35.0       # 65-128 Hz rms (uV)
+    SLOW_OK = 45.0                   # 1-30 Hz rms (uV) above this -> at most orange
+    REF_OK = 300.0                   # |drl| and |ref| below this = forehead contact
+
+    def __init__(self):
+        super().__init__()
+        self._feat = {}  # ch -> smoothed log features
+
+    def forehead(self, latest):
+        """Contact level of REF from the latest drl/ref values (0 = no data)."""
+        if not latest or "drl" not in latest or "ref" not in latest:
+            return 0
+        return 3 if abs(latest["drl"]) < self.REF_OK and abs(latest["ref"]) < self.REF_OK else 1
+
+    def connections(self, xs, q=None, latest=None):
+        import numpy as np
+        ref = self.forehead(latest)
+        out = {ch: 0 for ch in CHANNELS}
+        out.update({c: ref for c in EXTRA_CONTACTS})
+        n = min((sum(v is not None for v in xs.get(ch, [])) for ch in CHANNELS), default=0)
+        if n < 128:  # not enough data yet -> grey
+            return out
+        w = np.hanning(n)
+        f = np.fft.rfftfreq(n, 1 / self.FS)
+        bands = {"slow": (f >= 1) & (f < 30), "line": (f >= 45) & (f < 65), "hf": f >= 65}
+        for ch in CHANNELS:
+            x = np.array([v for v in xs[ch] if v is not None][-n:], float)
+            p2p = x.max() - x.min()
+            if p2p < self.FLAT_UV or p2p > self.RAIL_P2P or ref == 1:  # flat / railed / no reference
+                self._feat.pop(ch, None)
+                out[ch] = 1
+                continue
+            P = np.abs(np.fft.rfft((x - x.mean()) * w)) ** 2 * 2 / (n * (w ** 2).sum())  # one-sided mean-square
+            feat = {k: math.log(math.sqrt(P[m].sum()) + 1e-3) for k, m in bands.items()}
+            old = self._feat.get(ch)
+            if old is not None:
+                feat = {k: old[k] + self.SMOOTH * (v - old[k]) for k, v in feat.items()}
+            self._feat[ch] = feat
+            line, hf, slow = (math.exp(feat[k]) for k in ("line", "hf", "slow"))
+            if line > self.LINE_BAD or hf > self.HF_BAD:
+                out[ch] = 1
+            elif line > self.LINE_OK or hf > self.HF_OK or slow > self.SLOW_OK:
+                out[ch] = 2
+            else:
+                out[ch] = 3
+        return out
+
+
 # ---------------------------------------------------------------- drawing (tk canvas or PIL, same code)
 def draw(p, conn, sig, scale=1.0, labels=True, name=None, ypr=None, dead=False):
     """p: painter with oval/line/polygon/text; conn: {ch: 0..3}; sig: {ch: 0..1 or None};
@@ -265,7 +341,7 @@ def draw(p, conn, sig, scale=1.0, labels=True, name=None, ypr=None, dead=False):
         p.oval(x - 7 * s, cy - 15 * s, x + 7 * s, cy + 15 * s, fill="#f5f5f5", outline="#555555",
                width=max(1, round(1.5 * s)))
     p.oval(cx - R, cy - R, cx + R, cy + R, fill="#f5f5f5", outline="#555555", width=max(1, round(1.5 * s)))
-    for ch in CHANNELS:
+    for ch in CHANNELS + EXTRA_CONTACTS:
         ux, uy = POS[ch]
         x, y = cx + ux * R * 0.93, cy - uy * R * 0.93
         c = conn.get(ch, 0)
@@ -387,7 +463,7 @@ class Sender:
 
 
 def mock():
-    conn, sig = {}, {}
+    conn, sig = {c: 3 for c in EXTRA_CONTACTS}, {}
     for ch in CHANNELS:
         conn[ch] = random.choices([0, 1, 2, 3], [1, 1, 2, 8])[0]
         sig[ch] = None if conn[ch] == 0 else round(random.random() ** 0.5 * (conn[ch] / 3), 2)
@@ -574,11 +650,14 @@ def run_gui(args, est):
             state["conn"], state["sig"] = mock()
             state["ypr_raw"] = mock_ypr()
         else:
-            state["ypr_raw"] = orientation(buf.motion())
+            latest = buf.motion()
+            state["ypr_raw"] = orientation(latest)
             xs, fs, q = buf.window(est.CONN_WINDOW_S)
             state["dead"] = not xs
             if not xs:
                 state["conn"] = {}
+            elif hasattr(est, "forehead"):  # MuseQualityEstimator: also judges REF from drl/ref
+                state["conn"] = est.connections(xs, q, latest=latest)
             elif hasattr(est, "connections"):
                 state["conn"] = est.connections(xs, q)
             else:
@@ -648,7 +727,7 @@ def main():
              dead=a.dead)
         img.save(a.png)
         return
-    est = QualityEstimator()
+    est = globals()[LAYOUTS[LAYOUT]["estimator"]]()
     if a.estimator:
         mod, cls = a.estimator.split(":")
         est = getattr(importlib.import_module(mod), cls)()
