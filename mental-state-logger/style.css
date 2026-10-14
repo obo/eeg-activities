@@ -30,4 +30,4 @@ dialog input { font: inherit; padding: 6px; margin-left: 6px; }
 .msg { background: #ffebee; border: 1px solid #e57373; padding: 8px 12px; border-radius: 8px; }
 .title { font-size: 1.1em; }
 button.primary { background: #1e88e5; color: #fff; border-color: #1565c0; }
-button.toggle.flash { background: #90caf9; }
+button.toggle.flash { background: #e53935; border-color: #b71c1c; color: #fff; }

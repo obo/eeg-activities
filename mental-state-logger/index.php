@@ -107,7 +107,7 @@ document.querySelectorAll('button.toggle').forEach((b) => {
         }
         MSL.log('recent', `${b.dataset.group}: ${nameOf(b)} was happening in the recent past`);
         b.classList.add('flash');
-        setTimeout(() => b.classList.remove('flash'), 400);
+        setTimeout(() => b.classList.remove('flash'), 1000);
         return;
       }
       b.clickTimer = setTimeout(() => { b.clickTimer = null; toggle(b); }, DOUBLE_CLICK_MS);
