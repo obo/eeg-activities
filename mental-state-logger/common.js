@@ -76,6 +76,14 @@ MSL.status = {
     this.url = dev ? `devices/status-image-${dev}.png` : null;
   },
 
+  showPlaceholder(img) {
+    if (img.src.endsWith('devices/no-device.png')) return;
+    const old = img.src;
+    img.src = 'devices/no-device.png';
+    if (old.startsWith('blob:')) URL.revokeObjectURL(old);
+    this.etag = null;
+  },
+
   async tick() {
     const t0 = performance.now();
     const img = document.getElementById('status-image');
@@ -89,6 +97,8 @@ MSL.status = {
           img.src = URL.createObjectURL(blob);
           if (old.startsWith('blob:')) URL.revokeObjectURL(old);
           this.etag = tag;
+        } else if (!r.ok) {
+          this.showPlaceholder(img);   // no frame on the server (yet): never show a broken image
         }
         // lost: no image on the server, or the feeder has not sent a new frame for a while (both times are
         // the server's, so the browser's clock does not matter)
@@ -105,7 +115,7 @@ MSL.status = {
 };
 (() => {
   const img = document.getElementById('status-image');
-  if (img) { MSL.status.setDevice(img.dataset.device || ''); MSL.status.tick(); }
+  if (img) { img.addEventListener('error', () => MSL.status.showPlaceholder(img)); MSL.status.setDevice(img.dataset.device || ''); MSL.status.tick(); }
 })();
 
 // interface language: reload the page with ?lang=xx (handled server-side, remembered in the session + cookie)

@@ -170,7 +170,8 @@ function header_right_html(): string {
     }
     $menu .= '</select>';
     $dev = $_SESSION['device'] ?? '';
-    $src = isset(DEVICES[$dev]) ? 'devices/status-image-' . $dev . '.png' : 'devices/no-device.png';
+    $src = isset(DEVICES[$dev]) && is_file(__DIR__ . '/devices/status-image-' . $dev . '.png')
+        ? 'devices/status-image-' . $dev . '.png' : 'devices/no-device.png';
     return '<div class="header-right">' . $menu
         . '<div class="status" id="status" data-stale-after="' . STALE_AFTER_S . '">'
         . '<img id="status-image" width="180" height="180" alt="' . h(t('status_alt')) . '" src="' . h($src) . '" data-device="' . h($dev) . '">'
