@@ -14,6 +14,8 @@ The estimators live in class QualityEstimator; replace it (e.g. by a small neura
   ./eegact-headmap --lsl                       # read the EPOCX Lab Streaming Layer stream directly
   ./eegact-headmap --demo                     # random mock qualities, no input
   ./eegact-headmap --png out.png --scale 3    # render one mock frame to PNG (needs Pillow, no display)
+  ./eegact-headmap --lsl --send-to=https://HOST/PATH/mental-state-logger/ --device=epocx1 [--key=SECRET]
+                                               # also POST every frame as PNG to mental-state-logger
 
 --lsl reads the 'EPOCX' stream published by `epoc-direct-record --lsl` (needs
 pylsl). That stream carries raw ADC counts; they are scaled to epoc-record's
@@ -234,6 +236,58 @@ class PilPainter:
         self.d.text((x, y), t, fill="#212121", font=font, anchor="mm")
 
 
+class Sender:
+    """Ships the latest frame as PNG to mental-state-logger's feed-status-image.php in a background thread.
+
+    URL may be the mental-state-logger directory or the full feed-status-image.php URL. Only the newest
+    frame is kept (slow network = dropped frames, never a growing queue); an unchanged frame is re-sent
+    at most every HEARTBEAT_S seconds. Errors are reported on stderr (once per change) and never stop the GUI.
+    """
+    HEARTBEAT_S = 2.0
+
+    def __init__(self, url, device, key=None):
+        from urllib.parse import quote
+        if "feed-status-image.php" not in url:
+            url = url.rstrip("/") + "/feed-status-image.php"
+        sep = "&" if "?" in url else "?"
+        self.url = f"{url}{sep}device={quote(device)}" + (f"&key={quote(key)}" if key else "")
+        self.cv = threading.Condition()
+        self.png = None
+        self.last = (None, 0.0)
+        self.err = None
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, img):
+        import io
+        b = io.BytesIO()
+        img.save(b, "PNG")
+        with self.cv:
+            self.png = b.getvalue()
+            self.cv.notify()
+
+    def _run(self):
+        import urllib.request
+        while True:
+            with self.cv:
+                while self.png is None:
+                    self.cv.wait()
+                png, self.png = self.png, None
+            if png == self.last[0] and time.time() - self.last[1] < self.HEARTBEAT_S:
+                continue
+            try:
+                req = urllib.request.Request(self.url, data=png, headers={"Content-Type": "image/png"})
+                urllib.request.urlopen(req, timeout=5).close()
+                self.last = (png, time.time())
+                if self.err:
+                    print("# send-to: OK again", file=sys.stderr, flush=True)
+                self.err = None
+            except Exception as e:
+                if str(e) != self.err:
+                    print(f"# send-to failed: {e}", file=sys.stderr, flush=True)
+                self.err = str(e)
+                time.sleep(1.0)
+
+
 def mock():
     conn, sig = {}, {}
     for ch in CHANNELS:
@@ -365,6 +419,7 @@ def run_gui(args, est):
         else:
             threading.Thread(target=buf.read, args=(sys.stdin,), daemon=True).start()
     state = {"conn": {}, "sig": {}, "last_sig": 0.0}
+    sender = Sender(args.send_to, args.device, args.key) if args.send_to else None
 
     def tick():
         now = time.time()
@@ -384,6 +439,11 @@ def run_gui(args, est):
                 state["sig"] = {ch: est.signal(xs[ch], fs) for ch in CHANNELS} if xs else {}
         canvas.delete("all")
         draw(painter, state["conn"], state["sig"], labels=not args.no_labels)
+        if sender:
+            from PIL import Image
+            img = Image.new("RGB", (SIZE, SIZE), "#ffffff")
+            draw(PilPainter(img), state["conn"], state["sig"], labels=not args.no_labels)
+            sender.submit(img)
         root.after(1000 if args.demo else 200, tick)
 
     tick()
@@ -404,6 +464,11 @@ def main():
     ap.add_argument("--seed", type=int, default=4)
     ap.add_argument("--no-labels", action="store_true", help="do not print electrode names")
     ap.add_argument("--on-top", action="store_true", help="keep the window above other windows")
+    ap.add_argument("--send-to", metavar="URL",
+                    help="also POST each frame as PNG to mental-state-logger (its URL or feed-status-image.php URL)")
+    ap.add_argument("--device", default="epocx1",
+                    help="device id reported with --send-to: epocx1, epocx2, muse1 (default epocx1)")
+    ap.add_argument("--key", help="shared secret for --send-to (if the server has data/feed-key.txt)")
     ap.add_argument("--estimator", help="module:Class replacing QualityEstimator")
     a = ap.parse_args()
     random.seed(a.seed)
