@@ -20,6 +20,8 @@ current mental state during a lecture. No database, no PHP extensions beyond the
     only replaced when the ETag changes. No PHP runs per frame on the reading side.
   - feeder example: `curl -s --data-binary @frame.png -H 'Content-Type: image/png' 'https://HOST/PATH/feed-status-image.php?device=epocx1'`
   - optional shared secret: put it in `data/feed-key.txt` and pass `&key=...`.
+- `download.php?key=...` – ships `data/events.csv` + `data/users.json` as one zip. users.json holds plain-text
+  passwords, so it is disabled (403) unless `data/download-key.txt` exists; the `key` parameter must match it.
 - `make-mock-images.py` – mock frames for the 3 devices (drawn with eeg-activities/eegact/eegact-headmap).
 
 Devices and user metadata fields are configured at the top of `lib.php`.
