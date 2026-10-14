@@ -20,6 +20,15 @@ The estimators live in class QualityEstimator; replace it (e.g. by a small neura
 --lsl reads the 'EPOCX' stream published by `epoc-direct-record --lsl` (needs
 pylsl). That stream carries raw ADC counts; they are scaled to epoc-record's
 microvolt convention (LSL_ADC_TO_UV) so the same QualityEstimator applies.
+With several headsets, each recorder publishes its own stream (--lsl-name, e.g.
+the Bluetooth name) and each head map picks one with --lsl-name:
+
+  ./eegact-headmap --lsl --lsl-name 'EPOCX (E5021270)' --geometry +0+0
+
+The device name is printed small at the bottom, and the head orientation (from
+the motion channels MOT0..MOT5, see orientation()) is shown as three bars in the
+middle: yaw, pitch, roll. Click the window to zero the orientation (the current
+pose becomes the reference).
 """
 import argparse
 import importlib
@@ -43,6 +52,39 @@ _LEFT = {"AF3": (-0.25, 0.86), "F7": (-0.82, 0.55), "F3": (-0.40, 0.42), "FC5": 
          "T7": (-0.98, -0.25), "P7": (-0.72, -0.62), "O1": (-0.28, -0.90)}
 _MIRROR = {"AF4": "AF3", "F8": "F7", "F4": "F3", "FC6": "FC5", "T8": "T7", "P8": "P7", "O2": "O1"}
 POS = dict(_LEFT, **{r: (-_LEFT[l][0], _LEFT[l][1]) for r, l in _MIRROR.items()})
+
+# Head orientation from the EPOC-X motion block (epoc-direct-record's MOT0..MOT6).
+# MOT0..2 has a constant norm of ~16384 (1 g) -> gravity vector; MOT3..5 is taken
+# to be the magnetometer (needed for yaw; gravity alone cannot give it). Both axis
+# assignments are provisional -- swap/flip here after a tilt/turn test.
+GRAV_CH = ("MOT0", "MOT1", "MOT2")
+MAG_CH = ("MOT3", "MOT4", "MOT5")
+MOTION_CHANNELS = [f"MOT{i}" for i in range(7)]
+ORIENT_RANGE = {"Y": 180.0, "P": 90.0, "R": 180.0}  # full-scale of each bar, degrees
+
+
+def orientation(mot):
+    """{MOTn: value} -> (yaw, pitch, roll) in degrees, or None without motion data."""
+    try:
+        gx, gy, gz = (mot[c] for c in GRAV_CH)
+    except KeyError:
+        return None
+    if not gx and not gy and not gz:
+        return None
+    roll = math.atan2(gy, gz)
+    pitch = math.atan2(-gx, math.hypot(gy, gz))
+    yaw = 0.0
+    if all(c in mot for c in MAG_CH):  # tilt-compensated compass heading
+        mx, my, mz = (mot[c] for c in MAG_CH)
+        xh = mx * math.cos(pitch) + (my * math.sin(roll) + mz * math.cos(roll)) * math.sin(pitch)
+        yh = my * math.cos(roll) - mz * math.sin(roll)
+        yaw = math.atan2(-yh, xh)
+    return tuple(math.degrees(a) for a in (yaw, pitch, roll))
+
+
+def _wrap(a):
+    return (a + 180.0) % 360.0 - 180.0
+
 
 GREY, RED, ORANGE, GREEN = "#9e9e9e", "#e53935", "#fb8c00", "#43a047"
 CONN_COLOURS = [GREY, RED, ORANGE, GREEN]  # connection level 0..3
@@ -177,8 +219,9 @@ class QualityEstimator:
 
 
 # ---------------------------------------------------------------- drawing (tk canvas or PIL, same code)
-def draw(p, conn, sig, scale=1.0, labels=True):
-    """p: painter with oval/line/polygon/text; conn: {ch: 0..3}; sig: {ch: 0..1 or None}."""
+def draw(p, conn, sig, scale=1.0, labels=True, name=None, ypr=None):
+    """p: painter with oval/line/polygon/text; conn: {ch: 0..3}; sig: {ch: 0..1 or None};
+    name: device name printed at the bottom; ypr: (yaw, pitch, roll) degrees for the middle bars."""
     s = scale
     cx, cy, R = 90 * s, 95 * s, 66 * s
     er, ring = 13 * s, 4 * s  # electrode indicator radius and ring width
@@ -200,6 +243,20 @@ def draw(p, conn, sig, scale=1.0, labels=True):
             p.oval(x - r, y - r, x + r, y + r, fill=quality_colour(q), outline="", width=0)
         if labels:
             p.text(x, y, ch, size=max(5, round(6 * s)))
+    if ypr is not None:  # three signed bars in the free middle of the head: yaw, pitch, roll
+        bx, hw, bh = cx + 4 * s, 22 * s, 6 * s  # bar centre (zero), half width, height
+        for i, (lab, a) in enumerate(zip("YPR", ypr)):
+            y = cy - 6 * s + i * 11 * s
+            p.polygon([(bx - hw, y - bh / 2), (bx + hw, y - bh / 2), (bx + hw, y + bh / 2), (bx - hw, y + bh / 2)],
+                      fill="#ffffff", outline="#9e9e9e", width=1)
+            v = max(-1.0, min(1.0, a / ORIENT_RANGE[lab]))
+            if abs(v * hw) >= 0.5:
+                p.polygon([(bx, y - bh / 2), (bx + v * hw, y - bh / 2), (bx + v * hw, y + bh / 2), (bx, y + bh / 2)],
+                          fill="#1e88e5", outline="", width=0)
+            p.polygon([(bx, y - bh / 2 - s), (bx, y + bh / 2 + s)], fill="", outline="#555555", width=1)
+            p.text(bx - hw - 5 * s, y, lab, size=max(5, round(7 * s)))
+    if name:
+        p.text(cx, SIZE * s - 6 * s, name, size=max(6, round(8 * s)), bold=False)
 
 
 class TkPainter:
@@ -210,10 +267,13 @@ class TkPainter:
         self.c.create_oval(x0, y0, x1, y1, fill=fill, outline=outline, width=width)
 
     def polygon(self, pts, fill, outline, width):
-        self.c.create_polygon([v for pt in pts for v in pt], fill=fill, outline=outline, width=width)
+        if len(pts) == 2:  # a line
+            self.c.create_line([v for pt in pts for v in pt], fill=outline, width=width)
+        else:
+            self.c.create_polygon([v for pt in pts for v in pt], fill=fill, outline=outline, width=width)
 
-    def text(self, x, y, t, size):
-        self.c.create_text(x, y, text=t, fill="#212121", font=("Helvetica", -size, "bold"))
+    def text(self, x, y, t, size, bold=True):
+        self.c.create_text(x, y, text=t, fill="#212121", font=("Helvetica", -size, "bold" if bold else "normal"))
 
 
 class PilPainter:
@@ -225,12 +285,15 @@ class PilPainter:
         self.d.ellipse([x0, y0, x1, y1], fill=fill, outline=outline or None, width=width)
 
     def polygon(self, pts, fill, outline, width):
-        self.d.polygon(pts, fill=fill, outline=outline, width=width)
+        if len(pts) == 2:  # a line
+            self.d.line(pts, fill=outline, width=width)
+        else:
+            self.d.polygon(pts, fill=fill or None, outline=outline or None, width=width)
 
-    def text(self, x, y, t, size):
+    def text(self, x, y, t, size, bold=True):
         from PIL import ImageFont
         try:
-            font = ImageFont.truetype("DejaVuSans-Bold.ttf", size)
+            font = ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
         except OSError:
             font = ImageFont.load_default()
         self.d.text((x, y), t, fill="#212121", font=font, anchor="mm")
@@ -297,6 +360,10 @@ def mock():
     return conn, sig
 
 
+def mock_ypr():
+    return random.uniform(-120, 120), random.uniform(-45, 45), random.uniform(-60, 60)
+
+
 # ---------------------------------------------------------------- live input
 class Buffers:
     def __init__(self, seconds=4.0):
@@ -307,6 +374,8 @@ class Buffers:
         self.q = {ch: None for ch in CHANNELS}
         self.idx = None
         self.last_rx = 0.0
+        self.mot = {}            # latest motion values {MOTn: value} (arrive ~32 Hz, not every row)
+        self.device_name = None  # from the LSL stream (desc/device_name, else its name)
 
     def read(self, stream):
         for line in stream:
@@ -328,6 +397,10 @@ class Buffers:
                     qv = _num(f, self.idx.get(ch + "_q"))
                     if qv is not None:
                         self.q[ch] = int(qv)
+                for m in MOTION_CHANNELS:
+                    mv = _num(f, self.idx.get(m))
+                    if mv is not None:
+                        self.mot[m] = mv
                 while self.t and self.t[0] < t - self.seconds:
                     self.t.popleft()
                     for ch in CHANNELS:
@@ -344,11 +417,9 @@ class Buffers:
         """
         from pylsl import StreamInlet, resolve_byprop
         print(f"# resolving LSL stream '{name}' ...", file=sys.stderr, flush=True)
-        streams = resolve_byprop("name", name, timeout=5.0)
-        if not streams:
-            print(f"# no LSL stream '{name}' found (is `epoc-direct-record --lsl` running?)",
+        while not (streams := resolve_byprop("name", name, timeout=5.0)):  # recorder may still be connecting
+            print(f"# no LSL stream '{name}' found yet (is `epoc-direct-record --lsl` running?); retrying",
                   file=sys.stderr, flush=True)
-            return
         inlet = StreamInlet(streams[0], recover=True)
         info = inlet.info()
         labels, ch = [], info.desc().child("channels").child("channel")
@@ -359,7 +430,9 @@ class Buffers:
         chan_idx = {c: idx.get(c) for c in CHANNELS}
         if all(i is None for i in chan_idx.values()):  # no labels -> assume our order
             chan_idx = {c: 2 + i for i, c in enumerate(CHANNELS)}  # after packet_size,frame_counter
-        print(f"# connected to '{info.name()}' ({info.channel_count()} ch)",
+        mot_idx = {m: idx[m] for m in MOTION_CHANNELS if m in idx}
+        self.device_name = info.desc().child_value("device_name") or info.name()
+        print(f"# connected to '{info.name()}' ({info.channel_count()} ch), device {self.device_name}",
               file=sys.stderr, flush=True)
         while True:
             sample, ts = inlet.pull_sample(timeout=1.0)
@@ -376,6 +449,9 @@ class Buffers:
                     else:
                         v = v * scale
                     self.x[c].append(v)
+                for m, i in mot_idx.items():
+                    if i < len(sample) and sample[i] == sample[i]:  # NaN on rows without motion
+                        self.mot[m] = sample[i]
                 while self.t and self.t[0] < t - self.seconds:
                     self.t.popleft()
                     for c in CHANNELS:
@@ -392,6 +468,10 @@ class Buffers:
             fs = (len(self.t) - 1) / span if span > 0 else 128.0
             return {ch: list(self.x[ch])[-n:] for ch in CHANNELS}, fs, dict(self.q)
 
+    def motion(self):
+        with self.lock:
+            return dict(self.mot) if time.time() - self.last_rx <= 1.5 else {}
+
 
 def _num(f, i):
     try:
@@ -403,10 +483,10 @@ def _num(f, i):
 def run_gui(args, est):
     import tkinter as tk
     root = tk.Tk()
-    root.title("eegact")
-    root.geometry(f"{SIZE}x{SIZE}")
+    root.title(args.name or (args.lsl_name if getattr(args, "lsl", False) else "eegact"))
+    root.geometry(f"{SIZE}x{SIZE}{args.geometry or ''}")
     root.resizable(False, False)
-    if args.on_top:
+    if args.float_above:
         root.attributes("-topmost", True)
     canvas = tk.Canvas(root, width=SIZE, height=SIZE, bg="#ffffff", highlightthickness=0)
     canvas.pack()
@@ -418,14 +498,24 @@ def run_gui(args, est):
             threading.Thread(target=buf.read_lsl, args=(args.lsl_name,), daemon=True).start()
         else:
             threading.Thread(target=buf.read, args=(sys.stdin,), daemon=True).start()
-    state = {"conn": {}, "sig": {}, "last_sig": 0.0}
+    state = {"conn": {}, "sig": {}, "last_sig": 0.0, "ypr_raw": None, "zero": (0.0, 0.0, 0.0)}
     sender = Sender(args.send_to, args.device, args.key) if args.send_to else None
+
+    def rezero(_ev=None):  # click: the current pose becomes yaw = pitch = roll = 0
+        raw = state["ypr_raw"]
+        if raw:
+            state["zero"] = raw
+            print(f"# orientation zeroed at yaw/pitch/roll {raw[0]:.0f}/{raw[1]:.0f}/{raw[2]:.0f} deg",
+                  file=sys.stderr, flush=True)
+    canvas.bind("<Button-1>", rezero)
 
     def tick():
         now = time.time()
         if args.demo:
             state["conn"], state["sig"] = mock()
+            state["ypr_raw"] = mock_ypr()
         else:
+            state["ypr_raw"] = orientation(buf.motion())
             xs, fs, q = buf.window(est.CONN_WINDOW_S)
             if not xs:
                 state["conn"] = {}
@@ -437,12 +527,16 @@ def run_gui(args, est):
                 state["last_sig"] = now
                 xs, fs, _ = buf.window(est.SIGNAL_WINDOW_S)
                 state["sig"] = {ch: est.signal(xs[ch], fs) for ch in CHANNELS} if xs else {}
+        raw = state["ypr_raw"]
+        ypr = tuple(_wrap(a - z) for a, z in zip(raw, state["zero"])) if raw else None
+        name = args.name or (buf.device_name if buf else "demo")
         canvas.delete("all")
-        draw(painter, state["conn"], state["sig"], labels=not args.no_labels)
+        ypr = None if args.no_orientation else ypr
+        draw(painter, state["conn"], state["sig"], labels=not args.no_labels, name=name, ypr=ypr)
         if sender:
             from PIL import Image
             img = Image.new("RGB", (SIZE, SIZE), "#ffffff")
-            draw(PilPainter(img), state["conn"], state["sig"], labels=not args.no_labels)
+            draw(PilPainter(img), state["conn"], state["sig"], labels=not args.no_labels, name=name, ypr=ypr)
             sender.submit(img)
         root.after(1000 if args.demo else 200, tick)
 
@@ -463,7 +557,12 @@ def main():
     ap.add_argument("--scale", type=float, default=1.0, help="scale of the --png rendering (1 = 180x180)")
     ap.add_argument("--seed", type=int, default=4)
     ap.add_argument("--no-labels", action="store_true", help="do not print electrode names")
-    ap.add_argument("--on-top", action="store_true", help="keep the window above other windows")
+    ap.add_argument("--float-above", action="store_true",
+                    help="keep the window floating above other windows (default: a normal window)")
+    ap.add_argument("--geometry", help="window position, Tk style, e.g. +0+0 or -0+200")
+    ap.add_argument("--name", help="device name shown at the bottom and as window title "
+                    "(default: from the LSL stream)")
+    ap.add_argument("--no-orientation", action="store_true", help="do not draw the yaw/pitch/roll bars")
     ap.add_argument("--send-to", metavar="URL",
                     help="also POST each frame as PNG to mental-state-logger (its URL or feed-status-image.php URL)")
     ap.add_argument("--device", default="epocx1",
@@ -475,7 +574,8 @@ def main():
     if a.png:
         from PIL import Image
         img = Image.new("RGB", (round(SIZE * a.scale),) * 2, "#ffffff")
-        draw(PilPainter(img), *mock(), scale=a.scale, labels=not a.no_labels)
+        draw(PilPainter(img), *mock(), scale=a.scale, labels=not a.no_labels,
+             name=a.name or "EPOCX (E5021270)", ypr=None if a.no_orientation else mock_ypr())
         img.save(a.png)
         return
     est = QualityEstimator()
