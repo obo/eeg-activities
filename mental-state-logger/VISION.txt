@@ -1,0 +1,3 @@
+Long-term goal: a lightweight web UI where people wearing EEG devices (EPOC X, Muse) annotate their mental
+state during lectures; all UI events are logged with timestamps to be aligned with the EEG recordings, and the
+recording machines stream a live device-status image (connection/signal quality per electrode) into the page.
