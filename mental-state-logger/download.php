@@ -1,5 +1,6 @@
 <?php
 // Ships the recorded data (data/events.csv + data/users.json) as one zip: download.php?key=...
+// or one of them as is (no php zip extension needed): download.php?key=...&file=events.csv
 // users.json holds plain-text passwords, so this is closed unless data/download-key.txt exists and matches.
 require __DIR__ . '/lib.php';
 
@@ -13,6 +14,26 @@ if ($expected === '') {
 if (!hash_equals($expected, (string)($_GET['key'] ?? ''))) {
     http_response_code(403);
     exit("bad key\n");
+}
+
+if (isset($_GET['file'])) {
+    $files = ['events.csv' => [EVENTS_FILE, 'text/csv'], 'users.json' => [USERS_FILE, 'application/json']];
+    [$file, $type] = $files[(string)$_GET['file']] ?? [null, null];
+    if ($file === null) {
+        http_response_code(400);
+        exit("file must be one of: " . implode(', ', array_keys($files)) . "\n");
+    }
+    if (!is_file($file)) {
+        http_response_code(404);
+        exit("no data recorded yet\n");
+    }
+    header('Content-Type: ' . $type . '; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . basename($file) . '"');
+    header('Content-Length: ' . filesize($file));
+    header('Cache-Control: no-store');
+    readfile($file);
+    exit;
+
 }
 if (!class_exists('ZipArchive')) {
     http_response_code(500);
