@@ -33,8 +33,8 @@ if (isset($_GET['file'])) {
     header('Cache-Control: no-store');
     readfile($file);
     exit;
-
 }
+
 if (!class_exists('ZipArchive')) {
     http_response_code(500);
     exit("php zip extension missing\n");
