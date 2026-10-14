@@ -25,10 +25,22 @@ the Bluetooth name) and each head map picks one with --lsl-name:
 
   ./eegact-headmap --lsl --lsl-name 'EPOCX (E5021270)' --geometry +0+0
 
+A Muse headband (stream of `muse-record --lsl`) is shown with --layout muse
+(its 4 electrodes TP9 AF7 AF8 TP10, already in uV, orientation from the
+accelerometer only, so no yaw); --layout defaults to muse for --device muse*:
+
+  ./eegact-headmap --lsl --lsl-name Muse --device muse1 --send-to=...
+
+While there is no data (device not connected yet / gone), the map is drawn grey
+with a red NO SIGNAL across it -- and still sent, so the server shows it dead.
+
 The device name is printed small at the bottom, and the head orientation (from
 the motion channels MOT0..MOT5, see orientation()) is shown as three bars in the
 middle: yaw, pitch, roll. Click the window to zero the orientation (the current
-pose becomes the reference).
+pose becomes the reference). The small "float" toggle in the top right corner
+(or the f key) keeps the window floating above other windows, or not; it starts
+as --float-above says. The toggle is drawn only in the window, not in the
+frames sent with --send-to.
 """
 import argparse
 import importlib
@@ -62,6 +74,26 @@ MAG_CH = ("MOT3", "MOT4", "MOT5")
 MOTION_CHANNELS = [f"MOT{i}" for i in range(7)]
 ORIENT_RANGE = {"Y": 180.0, "P": 90.0, "R": 180.0}  # full-scale of each bar, degrees
 
+# Per-device layouts; use_layout() switches the module globals above (before anything is set up).
+# Muse: its 4 electrodes (as in mental-state-logger/make-mock-images.py), samples already in uV,
+# accelerometer ax/ay/az (g) as the gravity vector (axis assignment provisional, as for the EPOC),
+# no magnetometer -> no yaw.
+LAYOUTS = {
+    "epocx": dict(channels=list(CHANNELS), pos=dict(POS), lsl_scale=LSL_ADC_TO_UV,
+                  grav=GRAV_CH, mag=MAG_CH, motion=list(MOTION_CHANNELS)),
+    "muse": dict(channels=["TP9", "AF7", "AF8", "TP10"],
+                 pos={"TP9": (-0.92, -0.45), "AF7": (-0.55, 0.72), "AF8": (0.55, 0.72), "TP10": (0.92, -0.45)},
+                 lsl_scale=1.0, grav=("ax", "ay", "az"), mag=(), motion=["ax", "ay", "az"]),
+}
+
+
+def use_layout(name):
+    global POS, LSL_ADC_TO_UV, GRAV_CH, MAG_CH
+    lay = LAYOUTS[name]
+    CHANNELS[:] = lay["channels"]
+    MOTION_CHANNELS[:] = lay["motion"]
+    POS, LSL_ADC_TO_UV, GRAV_CH, MAG_CH = lay["pos"], lay["lsl_scale"], lay["grav"], lay["mag"]
+
 
 def orientation(mot):
     """{MOTn: value} -> (yaw, pitch, roll) in degrees, or None without motion data."""
@@ -74,7 +106,7 @@ def orientation(mot):
     roll = math.atan2(gy, gz)
     pitch = math.atan2(-gx, math.hypot(gy, gz))
     yaw = 0.0
-    if all(c in mot for c in MAG_CH):  # tilt-compensated compass heading
+    if MAG_CH and all(c in mot for c in MAG_CH):  # tilt-compensated compass heading
         mx, my, mz = (mot[c] for c in MAG_CH)
         xh = mx * math.cos(pitch) + (my * math.sin(roll) + mz * math.cos(roll)) * math.sin(pitch)
         yh = my * math.cos(roll) - mz * math.sin(roll)
@@ -219,9 +251,10 @@ class QualityEstimator:
 
 
 # ---------------------------------------------------------------- drawing (tk canvas or PIL, same code)
-def draw(p, conn, sig, scale=1.0, labels=True, name=None, ypr=None):
+def draw(p, conn, sig, scale=1.0, labels=True, name=None, ypr=None, dead=False):
     """p: painter with oval/line/polygon/text; conn: {ch: 0..3}; sig: {ch: 0..1 or None};
-    name: device name printed at the bottom; ypr: (yaw, pitch, roll) degrees for the middle bars."""
+    name: device name printed at the bottom; ypr: (yaw, pitch, roll) degrees for the middle bars;
+    dead: no data from the device -> red NO SIGNAL across the head."""
     s = scale
     cx, cy, R = 90 * s, 95 * s, 66 * s
     er, ring = 13 * s, 4 * s  # electrode indicator radius and ring width
@@ -255,6 +288,8 @@ def draw(p, conn, sig, scale=1.0, labels=True, name=None, ypr=None):
                           fill="#1e88e5", outline="", width=0)
             p.polygon([(bx, y - bh / 2 - s), (bx, y + bh / 2 + s)], fill="", outline="#555555", width=1)
             p.text(bx - hw - 5 * s, y, lab, size=max(5, round(7 * s)))
+    if dead:
+        p.text(cx, cy, "NO SIGNAL", size=max(8, round(16 * s)), fill=RED)
     if name:
         p.text(cx, SIZE * s - 6 * s, name, size=max(6, round(8 * s)), bold=False)
 
@@ -272,8 +307,8 @@ class TkPainter:
         else:
             self.c.create_polygon([v for pt in pts for v in pt], fill=fill, outline=outline, width=width)
 
-    def text(self, x, y, t, size, bold=True):
-        self.c.create_text(x, y, text=t, fill="#212121", font=("Helvetica", -size, "bold" if bold else "normal"))
+    def text(self, x, y, t, size, bold=True, fill="#212121"):
+        self.c.create_text(x, y, text=t, fill=fill, font=("Helvetica", -size, "bold" if bold else "normal"))
 
 
 class PilPainter:
@@ -290,13 +325,13 @@ class PilPainter:
         else:
             self.d.polygon(pts, fill=fill or None, outline=outline or None, width=width)
 
-    def text(self, x, y, t, size, bold=True):
+    def text(self, x, y, t, size, bold=True, fill="#212121"):
         from PIL import ImageFont
         try:
             font = ImageFont.truetype("DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf", size)
         except OSError:
             font = ImageFont.load_default()
-        self.d.text((x, y), t, fill="#212121", font=font, anchor="mm")
+        self.d.text((x, y), t, fill=fill, font=font, anchor="mm")
 
 
 class Sender:
@@ -356,7 +391,7 @@ def mock():
     for ch in CHANNELS:
         conn[ch] = random.choices([0, 1, 2, 3], [1, 1, 2, 8])[0]
         sig[ch] = None if conn[ch] == 0 else round(random.random() ** 0.5 * (conn[ch] / 3), 2)
-    conn["AF3"], sig["AF3"] = 3, 1.0  # one perfect electrode
+    conn[CHANNELS[0]], sig[CHANNELS[0]] = 3, 1.0  # one perfect electrode
     return conn, sig
 
 
@@ -407,14 +442,16 @@ class Buffers:
                         self.x[ch].popleft()
                 self.last_rx = time.time()
 
-    def read_lsl(self, name="EPOCX", scale=LSL_ADC_TO_UV):
+    def read_lsl(self, name="EPOCX", scale=None):
         """Fill the same buffers from the 'EPOCX' Lab Streaming Layer stream.
 
         Resolves the stream by name, maps its channel labels to our 14
         electrodes, and appends each sample (scaled ADC->uV). Contact-quality
         hints stay None (the raw stream carries no per-electrode quality), so
-        the estimator works purely from the signal.
+        the estimator works purely from the signal. Samples without any EEG
+        value (e.g. muse-record's acc/gyro/ppg rows) only update the motion.
         """
+        scale = LSL_ADC_TO_UV if scale is None else scale
         from pylsl import StreamInlet, resolve_byprop
         print(f"# resolving LSL stream '{name}' ...", file=sys.stderr, flush=True)
         while not (streams := resolve_byprop("name", name, timeout=5.0)):  # recorder may still be connecting
@@ -439,19 +476,21 @@ class Buffers:
             if sample is None:
                 continue
             t = ts if ts and ts > 1e9 else time.time()
+            vals = {}
+            for c in CHANNELS:
+                i = chan_idx.get(c)
+                v = sample[i] if (i is not None and i < len(sample)) else None
+                vals[c] = None if v is None or v != v else v * scale  # missing or NaN -> None
             with self.lock:
-                self.t.append(t)
-                for c in CHANNELS:
-                    i = chan_idx.get(c)
-                    v = sample[i] if (i is not None and i < len(sample)) else None
-                    if v is None or v != v:  # missing or NaN
-                        v = None
-                    else:
-                        v = v * scale
-                    self.x[c].append(v)
                 for m, i in mot_idx.items():
                     if i < len(sample) and sample[i] == sample[i]:  # NaN on rows without motion
                         self.mot[m] = sample[i]
+                self.last_rx = time.time()
+                if all(v is None for v in vals.values()):  # not an EEG row
+                    continue
+                self.t.append(t)
+                for c in CHANNELS:
+                    self.x[c].append(vals[c])
                 while self.t and self.t[0] < t - self.seconds:
                     self.t.popleft()
                     for c in CHANNELS:
@@ -486,11 +525,27 @@ def run_gui(args, est):
     root.title(args.name or (args.lsl_name if getattr(args, "lsl", False) else "eegact"))
     root.geometry(f"{SIZE}x{SIZE}{args.geometry or ''}")
     root.resizable(False, False)
-    if args.float_above:
-        root.attributes("-topmost", True)
     canvas = tk.Canvas(root, width=SIZE, height=SIZE, bg="#ffffff", highlightthickness=0)
     canvas.pack()
     painter = TkPainter(canvas)
+    floating = {"on": bool(args.float_above)}
+    root.attributes("-topmost", floating["on"])
+    FLOAT_BOX = (SIZE - 34, 0, SIZE, 14)  # the "float" toggle, top right corner
+
+    def toggle_float(_ev=None):
+        floating["on"] = not floating["on"]
+        root.attributes("-topmost", floating["on"])
+        draw_float()
+
+    def draw_float():
+        canvas.delete("float")
+        x0, y0, x1, y1 = FLOAT_BOX
+        on = floating["on"]
+        canvas.create_rectangle(x0 + 1, y0 + 1, x1 - 2, y1 - 1, fill="#1e88e5" if on else "#ffffff",
+                                outline="#1e88e5" if on else "#bdbdbd", tags="float")
+        canvas.create_text((x0 + x1) / 2, (y0 + y1) / 2, text="float", tags="float",
+                           fill="#ffffff" if on else "#9e9e9e", font=("Helvetica", -9, "bold" if on else "normal"))
+    root.bind("<KeyPress-f>", toggle_float)
     buf = None
     if not args.demo:
         buf = Buffers()
@@ -501,7 +556,11 @@ def run_gui(args, est):
     state = {"conn": {}, "sig": {}, "last_sig": 0.0, "ypr_raw": None, "zero": (0.0, 0.0, 0.0)}
     sender = Sender(args.send_to, args.device, args.key) if args.send_to else None
 
-    def rezero(_ev=None):  # click: the current pose becomes yaw = pitch = roll = 0
+    def rezero(ev=None):  # click: the current pose becomes yaw = pitch = roll = 0
+        x0, y0, x1, y1 = FLOAT_BOX
+        if ev is not None and x0 <= ev.x <= x1 and y0 <= ev.y <= y1:
+            toggle_float()
+            return
         raw = state["ypr_raw"]
         if raw:
             state["zero"] = raw
@@ -517,6 +576,7 @@ def run_gui(args, est):
         else:
             state["ypr_raw"] = orientation(buf.motion())
             xs, fs, q = buf.window(est.CONN_WINDOW_S)
+            state["dead"] = not xs
             if not xs:
                 state["conn"] = {}
             elif hasattr(est, "connections"):
@@ -529,14 +589,17 @@ def run_gui(args, est):
                 state["sig"] = {ch: est.signal(xs[ch], fs) for ch in CHANNELS} if xs else {}
         raw = state["ypr_raw"]
         ypr = tuple(_wrap(a - z) for a, z in zip(raw, state["zero"])) if raw else None
-        name = args.name or (buf.device_name if buf else "demo")
+        name = args.name or (buf.device_name if buf else "demo") or args.lsl_name
+        dead = state.get("dead", False)
         canvas.delete("all")
         ypr = None if args.no_orientation else ypr
-        draw(painter, state["conn"], state["sig"], labels=not args.no_labels, name=name, ypr=ypr)
+        draw(painter, state["conn"], state["sig"], labels=not args.no_labels, name=name, ypr=ypr, dead=dead)
+        draw_float()
         if sender:
             from PIL import Image
             img = Image.new("RGB", (SIZE, SIZE), "#ffffff")
-            draw(PilPainter(img), state["conn"], state["sig"], labels=not args.no_labels, name=name, ypr=ypr)
+            draw(PilPainter(img), state["conn"], state["sig"], labels=not args.no_labels, name=name, ypr=ypr,
+                 dead=dead)
             sender.submit(img)
         root.after(1000 if args.demo else 200, tick)
 
@@ -558,7 +621,8 @@ def main():
     ap.add_argument("--seed", type=int, default=4)
     ap.add_argument("--no-labels", action="store_true", help="do not print electrode names")
     ap.add_argument("--float-above", action="store_true",
-                    help="keep the window floating above other windows (default: a normal window)")
+                    help="start with the window floating above other windows (default: a normal window); "
+                    "toggle at runtime with the 'float' corner button or the f key")
     ap.add_argument("--geometry", help="window position, Tk style, e.g. +0+0 or -0+200")
     ap.add_argument("--name", help="device name shown at the bottom and as window title "
                     "(default: from the LSL stream)")
@@ -567,15 +631,21 @@ def main():
                     help="also POST each frame as PNG to mental-state-logger (its URL or feed-status-image.php URL)")
     ap.add_argument("--device", default="epocx1",
                     help="device id reported with --send-to: epocx1, epocx2, muse1 (default epocx1)")
+    ap.add_argument("--layout", choices=sorted(LAYOUTS),
+                    help="electrode layout (default: muse for --device muse*, else epocx)")
+    ap.add_argument("--dead", action="store_true", help="with --png: draw the NO SIGNAL frame")
     ap.add_argument("--key", help="shared secret for --send-to (if the server has data/feed-key.txt)")
     ap.add_argument("--estimator", help="module:Class replacing QualityEstimator")
     a = ap.parse_args()
     random.seed(a.seed)
+    use_layout(a.layout or ("muse" if a.device.startswith("muse") else "epocx"))
     if a.png:
         from PIL import Image
         img = Image.new("RGB", (round(SIZE * a.scale),) * 2, "#ffffff")
-        draw(PilPainter(img), *mock(), scale=a.scale, labels=not a.no_labels,
-             name=a.name or "EPOCX (E5021270)", ypr=None if a.no_orientation else mock_ypr())
+        conn, sig = ({}, {}) if a.dead else mock()
+        draw(PilPainter(img), conn, sig, scale=a.scale, labels=not a.no_labels,
+             name=a.name or "EPOCX (E5021270)", ypr=None if a.no_orientation or a.dead else mock_ypr(),
+             dead=a.dead)
         img.save(a.png)
         return
     est = QualityEstimator()
