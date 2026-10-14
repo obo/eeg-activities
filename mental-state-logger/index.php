@@ -1,75 +1,69 @@
 <?php
-// Main page: device + user in the top row, the live device status image top right, toggle buttons for the
-// current mental state (lecture setting) and modifier rows (language, fitness). Every interaction is logged
-// via event-logger.php (common.js); toggle states survive reloads within the browser tab (sessionStorage).
+// Main page: device + user in the top row, interface language and the live device status image top right,
+// toggle buttons for the current mental state (lecture setting) and modifier rows (language, fitness).
+// Every interaction is logged via event-logger.php (common.js), button names always in English;
+// toggle states survive reloads within the browser tab (sessionStorage). UI strings: languages/*.php.
 require __DIR__ . '/lib.php';
 start_session();
 $device = $_SESSION['device'] ?? '';
 $user = $_SESSION['user'] ?? '';
 session_write_close();
 
-const STATES = [
-    'Listening', 'Watching slides / board', 'Reading', 'Writing notes', 'Focused thinking',
-    'Problem solving', 'Memorizing', 'Asking / answering', 'Discussing with others', 'Interested',
-    'Confused', 'Bored', 'Daydreaming', 'Distracted (phone, laptop)', 'Taking a break', 'Resting',
-];
-const LANGUAGES = ['Mother tongue', 'English', 'Czech'];
-const FITNESS = ['Fit', 'Tired', 'Sleepy', 'Hungry', 'Stressed', 'Relaxed', 'Headache'];
+function toggle_buttons(string $group, string $key): void {
+    foreach (strings()[$key] as $id => $label) {
+        echo '<button class="toggle' . ($group === 'state' ? ' state' : '') . '" data-group="' . h($group)
+            . '" data-name="' . h(en($key, $id)) . '">' . h($label) . "</button>\n";
+    }
+}
 ?>
 <!DOCTYPE html>
-<html lang="en">
+<html lang="<?= h(ui_lang()) ?>">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mental state logger</title>
+<title><?= h(t('title')) ?></title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body data-page="index.php">
 <header>
   <div class="controls">
-    <label>Device
+    <label><?= h(t('device')) ?>
       <select id="device" name="device">
-        <option value="">– choose –</option>
+        <option value=""><?= h(t('choose')) ?></option>
         <?php foreach (DEVICES as $id => $label): ?>
           <option value="<?= h($id) ?>"<?= $id === $device ? ' selected' : '' ?>><?= h($label) ?></option>
         <?php endforeach; ?>
       </select>
     </label>
-    <a class="button" id="user-button" data-name="User" href="user.php">User: <?= $user === '' ? '<i>not logged in</i>' : h($user) ?></a>
+    <a class="button" id="user-button" data-name="User" href="user.php"><?= h(t('user')) ?>: <?= $user === '' ? '<i>' . h(t('not_logged_in')) . '</i>' : h($user) ?></a>
   </div>
-  <?= status_image_html() ?>
+  <?= header_right_html() ?>
 </header>
 
 <main>
   <section class="states">
-    <?php foreach (STATES as $s): ?>
-      <button class="toggle state" data-group="state" data-name="<?= h($s) ?>"><?= h($s) ?></button>
-    <?php endforeach; ?>
+    <?php toggle_buttons('state', 'states'); ?>
   </section>
 
   <section class="modifiers">
     <div class="row">
-      <span class="row-label">Language</span>
-      <?php foreach (LANGUAGES as $s): ?>
-        <button class="toggle" data-group="language" data-name="<?= h($s) ?>"><?= h($s) ?></button>
-      <?php endforeach; ?>
-      <button class="toggle" id="custom-language" data-group="language" data-name="Custom">Custom</button>
+      <span class="row-label"><?= h(t('language')) ?></span>
+      <?php toggle_buttons('language', 'languages'); ?>
+      <button class="toggle" id="custom-language" data-group="language" data-name="Custom"><?= h(t('custom')) ?></button>
     </div>
     <div class="row">
-      <span class="row-label">Fitness</span>
-      <?php foreach (FITNESS as $s): ?>
-        <button class="toggle" data-group="fitness" data-name="<?= h($s) ?>"><?= h($s) ?></button>
-      <?php endforeach; ?>
+      <span class="row-label"><?= h(t('fitness')) ?></span>
+      <?php toggle_buttons('fitness', 'fitness_states'); ?>
     </div>
   </section>
 </main>
 
 <dialog id="custom-dialog">
   <form method="dialog">
-    <label>Language <input id="custom-name" name="custom-language-name" autocomplete="off"></label>
+    <label><?= h(t('language')) ?> <input id="custom-name" name="custom-language-name" autocomplete="off"></label>
     <div class="dialog-buttons">
-      <button value="cancel" data-name="Custom language: cancel">Cancel</button>
-      <button value="ok" data-name="Custom language: OK">OK</button>
+      <button value="cancel" data-name="Custom language: cancel"><?= h(t('cancel')) ?></button>
+      <button value="ok" data-name="Custom language: OK"><?= h(t('ok')) ?></button>
     </div>
   </form>
 </dialog>
@@ -78,6 +72,7 @@ const FITNESS = ['Fit', 'Tired', 'Sleepy', 'Hungry', 'Stressed', 'Relaxed', 'Hea
 <script>
 'use strict';
 const KEY = 'msl-toggles';
+const CUSTOM_LABEL = <?= json_encode(t('custom'), JSON_UNESCAPED_UNICODE | JSON_HEX_TAG) ?>;
 const DOUBLE_CLICK_MS = 300;  // a single click on an activity is applied after this delay
 const saved = JSON.parse(sessionStorage.getItem(KEY) || '{}');
 
@@ -93,7 +88,7 @@ function setOn(b, on) {
 document.querySelectorAll('button.toggle').forEach((b) => {
   const s = saved[b.dataset.group + '/' + b.dataset.name];
   if (s) {
-    if (typeof s === 'string') { b.dataset.custom = s; b.textContent = `Custom: ${s}`; }
+    if (typeof s === 'string') { b.dataset.custom = s; b.textContent = `${CUSTOM_LABEL}: ${s}`; }
     b.classList.add('on');
   }
   b.addEventListener('click', () => {
@@ -129,7 +124,7 @@ function toggle(b) {
         const v = inp.value.trim();
         if (dlg.returnValue === 'ok' && v) {
           b.dataset.custom = v;
-          b.textContent = `Custom: ${v}`;
+          b.textContent = `${CUSTOM_LABEL}: ${v}`;
           setOn(b, true);
           MSL.log('toggle', `${b.dataset.group}: ${nameOf(b)} ON`);
         } else {

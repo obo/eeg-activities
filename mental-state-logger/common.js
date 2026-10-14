@@ -57,6 +57,15 @@ MSL.status = {
   etag: null,
   url: null,
   timer: null,
+  lost: false,
+  staleAfter: Number((document.getElementById('status') || {dataset: {}}).dataset.staleAfter || 3),
+
+  setLost(lost) {
+    const box = document.getElementById('status');
+    if (box) box.classList.toggle('lost', lost);
+    if (lost !== this.lost) MSL.log('status', lost ? 'connection lost' : 'connection ok');
+    this.lost = lost;
+  },
 
   setDevice(dev) {
     const img = document.getElementById('status-image');
@@ -80,11 +89,16 @@ MSL.status = {
           img.src = URL.createObjectURL(blob);
           if (old.startsWith('blob:')) URL.revokeObjectURL(old);
           this.etag = tag;
-          img.classList.remove('stale');
         }
+        // lost: no image on the server, or the feeder has not sent a new frame for a while (both times are
+        // the server's, so the browser's clock does not matter)
+        const age = (Date.parse(r.headers.get('Date')) - Date.parse(r.headers.get('Last-Modified'))) / 1000;
+        this.setLost(!r.ok || age > this.staleAfter);
       } catch (err) {
-        img.classList.add('stale');
+        this.setLost(true);   // the server is not reachable
       }
+    } else if (!this.url) {
+      this.setLost(false);
     }
     this.timer = setTimeout(() => this.tick(), Math.max(0, this.period - (performance.now() - t0)));
   },
@@ -92,4 +106,16 @@ MSL.status = {
 (() => {
   const img = document.getElementById('status-image');
   if (img) { MSL.status.setDevice(img.dataset.device || ''); MSL.status.tick(); }
+})();
+
+// interface language: reload the page with ?lang=xx (handled server-side, remembered in the session + cookie)
+(() => {
+  const sel = document.getElementById('ui-lang');
+  if (!sel) return;
+  sel.addEventListener('change', () => {
+    MSL.log('ui-language', sel.value);
+    const u = new URL(location.href);
+    u.searchParams.set('lang', sel.value);
+    location.href = u.toString();
+  });
 })();
