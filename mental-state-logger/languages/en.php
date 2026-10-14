@@ -20,6 +20,7 @@ return [
     'no_connection' => 'no connection',
 
     'states' => [
+        'checking' => 'Checking out the activities ->',
         'listening' => 'Listening',
         'watching' => 'Watching slides / board',
         'reading' => 'Reading',
@@ -50,6 +51,11 @@ return [
         'stressed' => 'Stressed',
         'relaxed' => 'Relaxed',
         'headache' => 'Headache',
+    ],
+
+    // Optional tooltips, keyed '<group>.<button id>'; buttons without an entry get none.
+    'tooltips' => [
+        'states.checking' => 'Select this if you are new to this reporting of your mental states. Then read all the buttons (Activities, Language, Fitness) one by one, possibly imagining the activity or state for a short moment. Then move to the next button. Once you finished reading all buttons, unselect this button again.',
     ],
 
     // user.php

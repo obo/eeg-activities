@@ -18,6 +18,7 @@ return [
     'no_connection' => 'bez spojení',
 
     'states' => [
+        'checking' => 'Prohlížím si aktivity ->',
         'listening' => 'Poslouchám',
         'watching' => 'Sleduji slajdy / tabuli',
         'reading' => 'Čtu',
@@ -48,6 +49,10 @@ return [
         'stressed' => 'Ve stresu',
         'relaxed' => 'Uvolněný/á',
         'headache' => 'Bolí mě hlava',
+    ],
+
+    'tooltips' => [
+        'states.checking' => 'Vyberte, pokud je pro vás toto hlášení duševních stavů nové. Pak postupně přečtěte všechna tlačítka (Aktivity, Jazyk, Kondice) a případně si na chvíli představte danou aktivitu nebo stav. Pak přejděte na další tlačítko. Až přečtete všechna tlačítka, toto tlačítko opět odznačte.',
     ],
 
     'known_user' => 'Existující uživatel',

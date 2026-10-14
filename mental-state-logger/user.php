@@ -95,6 +95,10 @@ natcasesort($names);
   <div class="controls">
     <a class="button" href="index.php" data-name="Back">&larr; <?= h(t('back')) ?></a>
     <span class="title"><?= h(t('user')) ?><?= $user !== '' ? ': <b>' . h($user) . '</b>' : '' ?></span>
+<?php if ($user !== ''): ?>
+    <button form="meta-form" name="action" value="logout" data-name="Switch user" formnovalidate><?= h(t('switch_user')) ?></button>
+    <button form="meta-form" name="action" value="save" data-name="Save" class="primary"><?= h(t('save')) ?></button>
+<?php endif; ?>
   </div>
   <?= header_right_html() ?>
 </header>
@@ -124,7 +128,7 @@ natcasesort($names);
     </form>
   </div>
 <?php else: ?>
-  <form method="post" class="box meta">
+  <form method="post" class="box meta" id="meta-form">
     <p class="hint"><?= h(t('optional_hint')) ?></p>
     <?php foreach (USER_FIELDS as $f => [$type, $opts]): $v = $meta[$f] ?? ''; ?>
       <label><span><?= h(t('fields', $f)) ?></span>
@@ -141,10 +145,6 @@ natcasesort($names);
         <?php endif; ?>
       </label>
     <?php endforeach; ?>
-    <div class="dialog-buttons">
-      <button name="action" value="logout" data-name="Switch user" formnovalidate><?= h(t('switch_user')) ?></button>
-      <button name="action" value="save" data-name="Save" class="primary"><?= h(t('save')) ?></button>
-    </div>
   </form>
 <?php endif; ?>
 </main>

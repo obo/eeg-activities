@@ -10,9 +10,11 @@ $user = $_SESSION['user'] ?? '';
 session_write_close();
 
 function toggle_buttons(string $group, string $key): void {
+    $tips = strings()['tooltips'] ?? [];
     foreach (strings()[$key] as $id => $label) {
         echo '<button class="toggle' . ($group === 'state' ? ' state' : '') . '" data-group="' . h($group)
-            . '" data-name="' . h(en($key, $id)) . '">' . h($label) . "</button>\n";
+            . '" data-name="' . h(en($key, $id)) . '"'
+            . (isset($tips[$key . '.' . $id]) ? ' title="' . h($tips[$key . '.' . $id]) . '"' : '') . '>' . h($label) . "</button>\n";
     }
 }
 ?>
